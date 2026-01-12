@@ -1284,8 +1284,16 @@ robot_init() {
         return 0
     fi
 
-    mkdir -p "$CONFIG_DIR/workflows" "$CONFIG_DIR/rounds" "$CONFIG_DIR/templates"
-    echo "default_workflow: default" > "$CONFIG_DIR/config.yaml"
+    # Handle errors gracefully to ensure JSON output
+    if ! mkdir -p "$CONFIG_DIR/workflows" "$CONFIG_DIR/rounds" "$CONFIG_DIR/templates" 2>/dev/null; then
+        robot_json false "init_failed" "$(jq -nc --arg dir "$CONFIG_DIR" '{directory: $dir}')" "Failed to create directory: $CONFIG_DIR"
+        return 1
+    fi
+
+    if ! echo "default_workflow: default" > "$CONFIG_DIR/config.yaml" 2>/dev/null; then
+        robot_json false "init_failed" '{"reason":"config_write"}' "Failed to write config file"
+        return 1
+    fi
 
     robot_json true "ok" '{"created":true,"existed":false}'
 }
@@ -1393,7 +1401,8 @@ cmd_robot() {
 
     # Check jq is available (required for robot mode)
     if ! command -v jq &>/dev/null; then
-        echo '{"ok":false,"code":"dependency_missing","data":{},"hint":"Robot mode requires jq. Install with: apt install jq"}' >&2
+        # Output to stdout (not stderr) for consistency with robot mode JSON output
+        echo '{"ok":false,"code":"dependency_missing","data":{},"hint":"Robot mode requires jq. Install with: apt install jq","meta":{"v":"'"$VERSION"'"}}'
         exit $EXIT_DEPENDENCY_ERROR
     fi
 
@@ -1408,11 +1417,16 @@ cmd_robot() {
                 shift
                 ;;
             -w|--workflow)
+                if [[ -z "${2:-}" ]]; then
+                    robot_json false "missing_argument" '{"option":"-w"}' "Option -w requires a workflow name"
+                    exit $EXIT_USAGE_ERROR
+                fi
                 WORKFLOW="$2"
                 shift 2
                 ;;
             -*)
-                robot_json false "invalid_option" "{\"option\":\"$1\"}" "Unknown option: $1"
+                # Use jq for proper escaping of user input in JSON
+                robot_json false "invalid_option" "$(jq -nc --arg opt "$1" '{option: $opt}')" "Unknown option: $1"
                 exit $EXIT_USAGE_ERROR
                 ;;
             *)
@@ -1445,7 +1459,8 @@ cmd_robot() {
             robot_help
             ;;
         *)
-            robot_json false "unknown_command" "{\"command\":\"$robot_cmd\"}" "Unknown command. Try 'apr robot help'"
+            # Use jq for proper escaping of user input in JSON
+            robot_json false "unknown_command" "$(jq -nc --arg cmd "$robot_cmd" '{command: $cmd}')" "Unknown command. Try 'apr robot help'"
             exit $EXIT_USAGE_ERROR
             ;;
     esac
