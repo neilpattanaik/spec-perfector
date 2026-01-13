@@ -113,7 +113,7 @@ APR_CACHE="${APR_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/apr}"
 CONFIG_DIR=".apr"
 
 # Oracle command (determined at runtime)
-ORACLE_CMD=""
+ORACLE_CMD=()
 
 # Temp directory for cleanup on exit
 APR_TEMP_DIR=""
@@ -496,10 +496,10 @@ check_gum() {
 
 check_oracle() {
     if command -v oracle &> /dev/null; then
-        ORACLE_CMD="oracle"
+        ORACLE_CMD=("oracle")
         return 0
     elif command -v npx &> /dev/null; then
-        ORACLE_CMD="npx -y @steipete/oracle"
+        ORACLE_CMD=("npx" "-y" "@steipete/oracle")
         return 0
     else
         return 1
@@ -528,11 +528,11 @@ preflight_check() {
         print_error "Pre-flight failed: Oracle not available"
         return 1
     fi
-    verbose "preflight: Oracle available via $ORACLE_CMD"
+    verbose "preflight: Oracle available via ${ORACLE_CMD[*]}"
 
     # Try to check Oracle health (quick version check)
     local oracle_version=""
-    if oracle_version=$($ORACLE_CMD --version 2>/dev/null); then
+    if oracle_version=$("${ORACLE_CMD[@]}" --version 2>/dev/null); then
         verbose "preflight: Oracle version: $oracle_version"
         print_success "Oracle available ($oracle_version)"
     else
@@ -617,7 +617,7 @@ run_oracle_with_retry() {
 
         # Run Oracle command
         set +e
-        $ORACLE_CMD "$@"
+        "${ORACLE_CMD[@]}" "$@"
         exit_code=$?
         set -e
 
@@ -2350,7 +2350,7 @@ run_round() {
         echo "" >&2
         print_info "Would execute:"
         echo "" >&2
-        echo "  $ORACLE_CMD --engine browser \\" >&2
+        echo "  ${ORACLE_CMD[*]} --engine browser \\" >&2
         echo "    -m \"$model\" \\" >&2
         for f in "${file_args[@]}"; do
             echo "    $f \\" >&2
@@ -2370,7 +2370,7 @@ run_round() {
         [[ "$copy" == "true" ]] && render_args+=("--copy")
 
         print_info "Rendering bundle for manual use..."
-        $ORACLE_CMD "${file_args[@]}" "${render_args[@]}" -p "$prompt"
+        "${ORACLE_CMD[@]}" "${file_args[@]}" "${render_args[@]}" -p "$prompt"
         exit $EXIT_SUCCESS
     fi
 
@@ -2400,7 +2400,7 @@ run_round() {
     [[ "$keep_browser" == "true" ]] && oracle_args+=(--browser-keep-browser)
     oracle_args+=(-p "$prompt")
 
-    verbose "Oracle command: $ORACLE_CMD ${oracle_args[*]}"
+    verbose "Oracle command: ${ORACLE_CMD[*]} ${oracle_args[*]}"
     verbose "Output file: $output_file"
     verbose "Session slug: $slug"
 
@@ -2431,7 +2431,7 @@ run_round() {
         if [[ "$enable_retry" == "true" ]]; then
             run_oracle_with_retry "${oracle_args[@]}" || oracle_exit=$?
         else
-            $ORACLE_CMD "${oracle_args[@]}" || oracle_exit=$?
+            "${ORACLE_CMD[@]}" "${oracle_args[@]}" || oracle_exit=$?
         fi
 
         local end_time elapsed_secs elapsed_fmt
