@@ -96,7 +96,7 @@ apr show <N>                   # View round output
 
 # Analysis
 apr diff <N> [M]               # Compare rounds (N vs M, or N vs N-1)
-apr stats                      # Convergence analytics
+apr stats                      # Convergence analytics + remaining rounds estimate
 apr integrate <N> -c           # Claude Code prompt → clipboard (KEY COMMAND)
 
 # Management
@@ -104,6 +104,7 @@ apr status [--hours 24]        # Oracle session status
 apr attach <slug>              # Reattach to session
 apr list                       # List workflows
 apr history                    # Round history
+apr backfill                   # Generate metrics from existing rounds
 apr update                     # Self-update
 
 ## Robot Mode (JSON API)
@@ -122,6 +123,7 @@ Codes: ok | not_configured | not_found | validation_failed | oracle_error
 ## Key Paths
 
 .apr/rounds/<workflow>/round_N.md   # ← GPT output (INTEGRATE THIS)
+.apr/rounds/<workflow>/metrics/     # Round analytics data
 .apr/workflows/<name>.yaml          # Workflow definition
 .apr/config.yaml                    # Default workflow
 
@@ -137,6 +139,16 @@ result=$(apr robot run 5 -w myspec -i)
 apr integrate 5 -w myspec --copy
 # File: .apr/rounds/myspec/round_5.md
 
+# 4. Check convergence to know when to stop
+apr stats -w myspec  # Score ≥0.75 = approaching stability
+
+## Reliability Features
+
+- Pre-flight validation before expensive Oracle runs
+- Auto-retry with exponential backoff (10s → 30s → 90s)
+- Session locking prevents concurrent runs
+- Configurable via APR_MAX_RETRIES, APR_INITIAL_BACKOFF
+
 ## Options
 
 -w, --workflow NAME   Workflow (default: from config)
@@ -150,11 +162,13 @@ apr integrate 5 -w myspec --copy
 --no-preflight        Skip validation
 --hours NUM           Status window (default: 72)
 --compact             Minified JSON (robot mode)
+--json                JSON output for stats command
+--detailed            Detailed metrics for stats command
 
 ## Dependencies
 
 Required: bash 4+, node 18+, oracle (or npx @steipete/oracle)
-Optional: gum (TUI), jq (robot mode)
+Optional: gum (TUI), jq (robot mode), delta (prettier diffs)
 ```
 
 ---
@@ -196,11 +210,24 @@ With each round, the specification becomes "less wrong." Not only is this a good
 - [The Workflow](#-the-workflow)
 - [Interactive Setup](#-interactive-setup)
 - [Session Monitoring](#-session-monitoring)
+- [Analysis Commands](#-analysis-commands)
+  - [View Round Output](#view-round-output-apr-show)
+  - [Compare Rounds](#compare-rounds-apr-diff)
+  - [Claude Code Integration](#claude-code-integration-apr-integrate)
+- [Convergence Analytics](#-convergence-analytics)
+  - [The Stats Command](#the-stats-command)
+  - [Convergence Algorithm](#convergence-algorithm)
+  - [Backfill Historical Data](#backfill-historical-data)
+- [Reliability Features](#-reliability-features)
+  - [Pre-Flight Validation](#pre-flight-validation)
+  - [Auto-Retry with Backoff](#auto-retry-with-exponential-backoff)
+  - [Session Locking](#session-locking)
 - [Robot Mode](#-robot-mode-automation-api)
 - [Self-Update](#-self-update)
 - [The Inspiration](#-the-inspiration-flywheel-connector-protocol)
 - [Design Principles](#-design-principles)
 - [Architecture](#-architecture)
+- [Testing Framework](#-testing-framework)
 - [Terminal Styling](#-terminal-styling)
 - [Dependencies](#-dependencies)
 - [Environment Variables](#-environment-variables)
@@ -353,15 +380,24 @@ apr [command] [options]
 
 | Command | Description |
 |---------|-------------|
+| **Core Workflow** | |
 | `run <round>` | Run a revision round (default if number given) |
 | `setup` | Interactive workflow setup wizard |
 | `status` | Check Oracle session status |
 | `attach <session>` | Attach to a running/completed session |
+| **Management** | |
 | `list` | List all configured workflows |
 | `history` | Show revision history for current workflow |
+| `backfill` | Generate metrics from existing rounds |
 | `update` | Check for and install updates |
-| `robot <cmd>` | Machine-friendly JSON interface for coding agents |
 | `help` | Show help message |
+| **Analysis** | |
+| `show <round>` | View round output with pager support |
+| `diff <N> [M]` | Compare round outputs (N vs M, or N vs N-1) |
+| `integrate <round>` | Generate Claude Code integration prompt |
+| `stats` | Show round analytics and convergence signals |
+| **Automation** | |
+| `robot <cmd>` | Machine-friendly JSON interface for coding agents |
 
 ### Options
 
@@ -555,6 +591,229 @@ npx -y @steipete/oracle session apr-fcp-spec-round-5 --render
 
 ### Desktop Notifications
 APR automatically enables desktop notifications (via Oracle's `--notify` flag) so you'll be alerted when a review completes.
+
+---
+
+## 🔍 Analysis Commands
+
+Once you've accumulated rounds of feedback, APR provides powerful tools to navigate, compare, and integrate the outputs. These commands transform raw GPT Pro output into actionable insights.
+
+### View Round Output (`apr show`)
+
+View any round's output with intelligent paging:
+
+```bash
+# View a specific round
+apr show 5
+
+# View from a specific workflow
+apr show 3 -w my-protocol
+```
+
+The `show` command:
+- Automatically uses your preferred pager (`$PAGER`, falling back to `less` or `more`)
+- Supports all standard pager navigation (search with `/`, page up/down, etc.)
+- Falls back to direct output when piped or in non-interactive mode
+
+### Compare Rounds (`apr diff`)
+
+Track how the specification evolves across iterations:
+
+```bash
+# Compare round 3 to round 4
+apr diff 3 4
+
+# Compare round 5 to its predecessor (round 4)
+apr diff 5
+
+# Use a specific diff tool
+apr diff 3 5 --tool delta
+```
+
+The diff command intelligently selects the best available diff tool:
+1. **delta** — Beautiful syntax-highlighted diffs with line numbers
+2. **diff** — Standard UNIX diff as fallback
+
+**Why diff matters:** Seeing what changed between rounds reveals the convergence pattern. Early diffs show major structural changes; later diffs show increasingly subtle refinements—confirming you're approaching a stable design.
+
+### Claude Code Integration (`apr integrate`)
+
+The `integrate` command generates prompts optimized for handing GPT Pro's feedback to Claude Code:
+
+```bash
+# Generate integration prompt
+apr integrate 5
+
+# Copy directly to clipboard
+apr integrate 5 --copy
+
+# Output to file for later use
+apr integrate 5 --output round5_prompt.md
+```
+
+The generated prompt:
+- Includes context priming (instructs Claude to read AGENTS.md, README, spec)
+- Wraps the GPT Pro output in appropriate delimiters
+- Adds integration instructions for applying changes
+
+**Workflow tip:** Run `apr integrate 5 -c`, then paste directly into Claude Code. The prompt is structured to maximize Claude's understanding of the context and desired changes.
+
+---
+
+## 📊 Convergence Analytics
+
+APR doesn't just run rounds—it tracks metrics over time to detect when your specification is converging toward a stable design. This transforms subjective "are we done yet?" into quantifiable signals.
+
+### The Stats Command
+
+```bash
+# Show analytics for current workflow
+apr stats
+
+# Detailed metrics with document statistics
+apr stats --detailed
+
+# JSON output for programmatic use
+apr stats --json
+```
+
+Example output:
+
+```
+╭────────────────────────────────────────────────────────────╮
+│  CONVERGENCE ANALYTICS                                      │
+│  Workflow: fcp-spec                                         │
+├────────────────────────────────────────────────────────────┤
+│  Rounds completed: 12                                       │
+│  Convergence score: 0.82 (HIGH - approaching stability)    │
+│  Estimated remaining: 2-3 rounds                            │
+│                                                             │
+│  Signal Analysis:                                           │
+│    Output size trend:  ↓ decreasing (0.89)                 │
+│    Change velocity:    ↓ slowing (0.78)                    │
+│    Content similarity: ↑ increasing (0.79)                 │
+╰────────────────────────────────────────────────────────────╯
+```
+
+### Convergence Algorithm
+
+The convergence detector uses a weighted combination of three signals:
+
+```
+Score = (0.35 × output_trend) + (0.35 × change_velocity) + (0.30 × similarity_trend)
+```
+
+| Signal | Weight | What It Measures |
+|--------|--------|------------------|
+| **Output Size Trend** | 35% | Are GPT Pro's responses getting shorter? Early rounds produce lengthy analyses; convergence shows as more focused, briefer feedback. |
+| **Change Velocity** | 35% | Is the rate of change slowing? Measured by comparing delta sizes between consecutive rounds. |
+| **Content Similarity** | 30% | Are successive rounds becoming more similar? Uses word-level overlap to detect stabilization. |
+
+**Interpretation:**
+- **Score ≥ 0.75**: High confidence of convergence. The specification is stabilizing.
+- **Score 0.50-0.74**: Moderate convergence. Significant work remains but progress is visible.
+- **Score < 0.50**: Low convergence. Still in early iteration phase with major changes likely.
+
+The algorithm also estimates remaining rounds based on the current convergence trajectory, helping you plan your workflow.
+
+### Backfill Historical Data
+
+If you've been running rounds before metrics collection was added, the `backfill` command generates metrics retroactively:
+
+```bash
+# Backfill metrics for all rounds
+apr backfill
+
+# Backfill for a specific workflow
+apr backfill -w my-protocol
+
+# Force regeneration even if metrics exist
+apr backfill --force
+```
+
+Backfill analyzes each round's output file and generates:
+- Character, word, and line counts
+- Heading and section counts
+- Timestamps from file metadata
+- Baseline data for convergence calculations
+
+---
+
+## 🛡️ Reliability Features
+
+Extended reasoning sessions can take 30-60 minutes. APR includes multiple features to ensure these expensive operations succeed reliably.
+
+### Pre-Flight Validation
+
+Before sending anything to Oracle, APR validates that all preconditions are met:
+
+```bash
+# Run with explicit pre-flight (default behavior)
+apr run 5
+
+# Skip pre-flight for faster startup
+apr run 5 --no-preflight
+```
+
+Pre-flight checks verify:
+
+| Check | What It Validates |
+|-------|-------------------|
+| **Oracle availability** | Oracle is installed and accessible (global or npx) |
+| **Workflow exists** | The specified workflow configuration is readable |
+| **README exists** | The project README file is present |
+| **Spec exists** | The specification document is accessible |
+| **Implementation exists** | If `--include-impl`, verifies the implementation doc |
+| **Previous round** | For round N > 1, verifies round N-1 exists |
+
+**Why this matters:** Discovering a missing file 30 minutes into a GPT Pro session is frustrating. Pre-flight catches these issues in under a second.
+
+### Auto-Retry with Exponential Backoff
+
+Network issues, rate limits, and transient failures shouldn't require manual intervention. APR automatically retries failed Oracle operations:
+
+```
+Attempt 1 → fail → wait 10s
+Attempt 2 → fail → wait 30s  (10s × 3)
+Attempt 3 → fail → wait 90s  (30s × 3)
+Attempt 4 → success (or final failure)
+```
+
+Configuration via environment variables:
+
+```bash
+# Maximum retry attempts (default: 3)
+export APR_MAX_RETRIES=5
+
+# Initial backoff in seconds (default: 10)
+export APR_INITIAL_BACKOFF=15
+```
+
+The exponential backoff (multiplier of 3) prevents hammering the service while giving transient issues time to resolve.
+
+### Session Locking
+
+Concurrent runs of the same workflow can cause data corruption or wasted Oracle sessions. APR uses file-based locking:
+
+```
+.apr/rounds/<workflow>/.lock
+```
+
+When a run starts:
+1. APR attempts to acquire the lock
+2. If locked, it displays who holds it and when it was acquired
+3. Stale locks (from crashed processes) are automatically cleaned after 2 hours
+
+```
+╭────────────────────────────────────────────────────────────╮
+│  ⚠ WORKFLOW LOCKED                                          │
+│                                                             │
+│  Workflow 'fcp-spec' is currently in use.                  │
+│  Locked by: PID 12345 at 2026-01-12 14:30:00               │
+│                                                             │
+│  Use 'apr status' to check the running session.            │
+╰────────────────────────────────────────────────────────────╯
+```
 
 ---
 
@@ -1019,21 +1278,36 @@ Security considerations are woven throughout:
 ### Component Overview
 
 ```
-apr (bash script, ~1950 LOC)
+apr (bash script, ~5000 LOC)
 ├── Core Commands
-│   ├── run           # Execute revision rounds
+│   ├── run           # Execute revision rounds with retry logic
 │   ├── setup         # Interactive workflow wizard
 │   ├── status        # Oracle session status
 │   ├── attach        # Reattach to sessions
 │   ├── list          # List workflows
-│   └── history       # Round history
+│   ├── history       # Round history
+│   ├── show          # View round output
+│   ├── diff          # Compare rounds
+│   ├── integrate     # Claude Code prompts
+│   ├── stats         # Convergence analytics
+│   └── backfill      # Retroactive metrics
 ├── Robot Mode        # JSON API for automation
 │   ├── status        # Environment introspection
 │   ├── workflows     # List workflows
 │   ├── init          # Initialize .apr/
 │   ├── validate      # Pre-flight checks
 │   ├── run           # Execute rounds
+│   ├── history       # Round history (JSON)
 │   └── help          # API documentation
+├── Reliability Layer
+│   ├── Pre-flight validation
+│   ├── Auto-retry with exponential backoff
+│   ├── Session locking
+│   └── Graceful error handling
+├── Analytics Engine
+│   ├── Metrics collection
+│   ├── Convergence detection
+│   └── Round comparison
 ├── Self-Update       # Secure update mechanism
 │   ├── Version comparison
 │   ├── Checksum verification
@@ -1068,6 +1342,86 @@ override the Oracle prompt. If omitted, APR uses the built-in default prompt.
 | `.apr/config.yaml` | Global APR config for this project |
 | `.apr/workflows/*.yaml` | Workflow definitions |
 | `.apr/rounds/<workflow>/` | GPT Pro outputs per round |
+| `.apr/rounds/<workflow>/metrics/` | Round analytics data |
+
+---
+
+## 🧪 Testing Framework
+
+APR includes a comprehensive test suite built on [BATS](https://github.com/bats-core/bats-core) (Bash Automated Testing System). The test infrastructure validates everything from individual functions to complete end-to-end workflows.
+
+### Test Structure
+
+```
+tests/
+├── helpers/
+│   └── test_helper.bash      # Shared fixtures and assertions
+├── unit/
+│   ├── test_yaml_parser.bats # YAML parsing edge cases
+│   ├── test_exit_codes.bats  # Exit code contract verification
+│   └── ...                   # Function-level tests
+├── e2e/
+│   └── test_full_workflow.bats  # Complete workflow tests
+└── logs/
+    └── test_run_*.log        # Test execution logs
+```
+
+### Running Tests
+
+```bash
+# Run all tests
+./tests/run_tests.sh
+
+# Run only unit tests
+bats tests/unit/
+
+# Run only e2e tests
+bats tests/e2e/
+
+# Run with verbose output
+bats --verbose-run tests/
+```
+
+### Test Categories
+
+| Category | Purpose | Count |
+|----------|---------|-------|
+| **Unit Tests** | Individual function validation | ~160 |
+| **Exit Code Tests** | Verify semantic exit codes | ~30 |
+| **YAML Parser Tests** | Edge cases in config parsing | ~25 |
+| **E2E Tests** | Complete workflow journeys | ~20 |
+
+### Key Testing Principles
+
+1. **No Oracle dependency** — Tests use mocked Oracle responses to run quickly and offline
+2. **Isolated environments** — Each test creates a fresh project directory in `/tmp`
+3. **Semantic exit codes** — Tests verify that specific error conditions produce specific exit codes
+4. **Stream separation** — Tests validate that JSON goes to stdout, errors to stderr
+5. **Robot mode coverage** — Full JSON API contract validation
+
+### Custom Assertions
+
+The test helper provides domain-specific assertions:
+
+```bash
+# File and directory assertions
+assert_file_exists ".apr/config.yaml"
+assert_dir_exists ".apr/workflows"
+
+# Exit code verification
+assert_exit_code 0   # Success
+assert_exit_code 2   # Usage error
+assert_exit_code 4   # Config error
+
+# JSON validation
+assert_valid_json "$output"
+assert_json_value "$output" ".ok" "true"
+assert_json_value "$output" ".code" "ok"
+
+# Stream capture
+capture_streams "$APR_SCRIPT" robot status
+assert_valid_json "$CAPTURED_STDOUT"
+```
 
 ---
 
@@ -1176,14 +1530,36 @@ sudo apt-get install jq
 
 ## 🌐 Environment Variables
 
+### Core Settings
+
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `APR_HOME` | Data directory | `~/.local/share/apr` |
 | `APR_CACHE` | Cache directory | `~/.cache/apr` |
 | `APR_CHECK_UPDATES` | Enable daily update checking | unset (set to `1` to enable) |
+
+### Reliability Configuration
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `APR_MAX_RETRIES` | Maximum Oracle retry attempts | `3` |
+| `APR_INITIAL_BACKOFF` | Initial retry delay (seconds) | `10` |
+
+### Status & Monitoring
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `APR_STATUS_HOURS` | Time window for status checks (hours) | `72` |
+| `APR_VERBOSE` | Enable verbose/debug output | unset |
+
+### Display Settings
+
+| Variable | Description | Default |
+|----------|-------------|---------|
 | `APR_NO_GUM` | Disable gum even if available | unset |
 | `NO_COLOR` | Disable colored output (accessibility) | unset |
 | `CI` | Detected CI environment (disables gum) | unset |
+| `PAGER` | Pager for `apr show` output | `less` or `more` |
 
 ---
 
