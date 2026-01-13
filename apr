@@ -4092,7 +4092,7 @@ dashboard_handle_input() {
         q|Q) echo "quit" ;;
         r|R) echo "refresh" ;;
         d|D) echo "diff" ;;
-        '?') echo "help" ;;
+        '?'|h|H) echo "help" ;;
         '') echo "detail" ;;
     esac
 }
@@ -4153,6 +4153,15 @@ show_dashboard() {
     trap 'dashboard_show_cursor; dashboard_clear' EXIT
 
     while true; do
+        read -r cols rows < <(dashboard_term_size)
+        if (( cols < 80 || rows < 24 )); then
+            dashboard_clear
+            print_error "Terminal too small for dashboard (${cols}x${rows})"
+            print_info "Resize to at least 80x24 and press any key to retry"
+            read -rsn1 _ </dev/tty
+            continue
+        fi
+
         metrics=$(metrics_read "$workflow") || exit $EXIT_CONFIG_ERROR
         dashboard_build_rounds "$metrics"
 
