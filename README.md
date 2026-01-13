@@ -1624,6 +1624,7 @@ sudo apt-get install jq
 | `APR_HOME` | Data directory | `~/.local/share/apr` |
 | `APR_CACHE` | Cache directory | `~/.cache/apr` |
 | `APR_CHECK_UPDATES` | Enable daily update checking | unset (set to `1` to enable) |
+| `APR_NO_NPX` | Disable npx fallback for Oracle (require global `oracle`) | unset |
 
 ### Reliability Configuration
 
@@ -1667,6 +1668,7 @@ npm install -g @steipete/oracle
 # Or use npx (works without global install)
 npx -y @steipete/oracle --version
 ```
+If you set `APR_NO_NPX=1`, APR will not use the npx fallback.
 
 </details>
 

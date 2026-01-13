@@ -143,13 +143,9 @@ load '../helpers/test_helper.bash'
     cd "$TEST_PROJECT"
     setup_test_workflow
 
-    # Hide oracle from PATH
-    local original_path="$PATH"
-    export PATH="/usr/bin:/bin"
-
-    run "$APR_SCRIPT" run 1
-
-    export PATH="$original_path"
+    # Hide oracle/npx from the script. Some environments include npx in /usr/bin,
+    # which would otherwise trigger the npx fallback and attempt a real run.
+    run env PATH="/usr/bin:/bin" APR_NO_NPX=1 "$APR_SCRIPT" run 1
 
     # Should fail due to missing Oracle
     # Exit code 3 (dependency) or include error message about Oracle

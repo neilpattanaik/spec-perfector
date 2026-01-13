@@ -28,7 +28,9 @@ load "$BATS_LIB_DIR/bats-support/load"
 load "$BATS_LIB_DIR/bats-assert/load"
 
 # Load our custom helpers
+# shellcheck disable=SC1091  # Test helper paths are resolved at runtime.
 source "$HELPERS_DIR/logging.bash"
+# shellcheck disable=SC1091  # Test helper paths are resolved at runtime.
 source "$HELPERS_DIR/assertions.bash"
 
 # Fixtures directory
@@ -319,6 +321,7 @@ capture_streams() {
     # into an immediate test failure. We intentionally capture failures.
     # shellcheck disable=SC2034  # Used by callers
     CAPTURED_STATUS=0
+    # shellcheck disable=SC2034  # Used by callers
     "$@" > "$stdout_file" 2> "$stderr_file" || CAPTURED_STATUS=$?
 
     # shellcheck disable=SC2034  # Used by callers
@@ -350,6 +353,11 @@ for arg in "$@"; do
     case "$arg" in
         --render) render_mode=true ;;
         --version) echo "oracle 0.8.4 (mock)"; exit 0 ;;
+        --help)
+            echo "Usage: oracle [options]"
+            echo "  --notify"
+            exit 0
+            ;;
     esac
 done
 

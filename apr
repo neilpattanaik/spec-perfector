@@ -116,8 +116,9 @@ CONFIG_DIR=".apr"
 # Oracle command (determined at runtime)
 ORACLE_CMD=()
 
-# Oracle feature detection (set during preflight)
+# Oracle feature detection (best-effort, set during preflight and other entrypoints)
 ORACLE_SUPPORTS_NOTIFY=false
+ORACLE_FEATURES_DETECTED=false
 
 # Temp directory for cleanup on exit
 APR_TEMP_DIR=""
@@ -175,10 +176,12 @@ acquire_lock() {
         # Open file descriptor without truncating. Only update the PID file after the lock is acquired,
         # otherwise failed attempts can clobber the running process' PID info.
         if ! exec {APR_LOCK_FD}<>"$lock_path"; then
+            verbose "acquire_lock: failed to open FD for $lock_path"
             APR_LOCK_FD=""
             return 1
         fi
         if ! flock -n "$APR_LOCK_FD"; then
+            verbose "acquire_lock: flock failed for FD $APR_LOCK_FD ($lock_path)"
             # Failed to acquire: close FD and return
             { exec {APR_LOCK_FD}>&-; } 2>/dev/null || true
             APR_LOCK_FD=""
@@ -188,11 +191,13 @@ acquire_lock() {
         : > "$lock_path" 2>/dev/null || true
         printf '%s\n' "$$" 1>&"$APR_LOCK_FD" 2>/dev/null || true
         APR_LOCK_FILE="$lock_path"
+        verbose "acquire_lock: acquired flock on FD $APR_LOCK_FD ($lock_path)"
     else
         # Fallback: simple file-based locking
         # Try atomic creation first (noclobber)
         if (set -C; echo "$$" > "$lock_path") 2>/dev/null; then
             APR_LOCK_FILE="$lock_path"
+            verbose "acquire_lock: acquired fallback lock ($lock_path)"
             return 0
         fi
 
@@ -201,6 +206,7 @@ acquire_lock() {
         pid=$(cat "$lock_path" 2>/dev/null || echo "")
         # Check if the process is still running
         if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+            verbose "acquire_lock: fallback lock held by PID $pid"
             return 1
         fi
         
@@ -210,6 +216,7 @@ acquire_lock() {
         fi
         if (set -C; echo "$$" > "$lock_path") 2>/dev/null; then
             APR_LOCK_FILE="$lock_path"
+            verbose "acquire_lock: acquired fallback lock after stale cleanup"
             return 0
         fi
         return 1
@@ -220,10 +227,12 @@ acquire_lock() {
 # Release the lock
 release_lock() {
     if [[ -n "$APR_LOCK_FD" ]]; then
+        verbose "release_lock: closing FD $APR_LOCK_FD"
         { exec {APR_LOCK_FD}>&-; } 2>/dev/null || true
         APR_LOCK_FD=""
     fi
     if [[ -n "$APR_LOCK_FILE" && -f "$APR_LOCK_FILE" ]]; then
+        verbose "release_lock: removing file $APR_LOCK_FILE"
         rm -f "$APR_LOCK_FILE" 2>/dev/null || true
         APR_LOCK_FILE=""
     fi
@@ -233,6 +242,7 @@ release_lock() {
 # the parent shell EXIT trap from releasing it prematurely.
 background_lock_detach_parent() {
     local background_pid="$1"
+    verbose "background_lock_detach_parent: pid=$background_pid"
 
     # If using file-based lock fallback (no flock), write the background PID so
     # stale detection doesn't treat the lock as dead when the parent exits.
@@ -242,6 +252,7 @@ background_lock_detach_parent() {
 
     # Close parent's copy of the lock FD (if any) without removing the lock file.
     if [[ -n "$APR_LOCK_FD" ]]; then
+        verbose "background_lock_detach_parent: closing parent FD $APR_LOCK_FD"
         { exec {APR_LOCK_FD}>&-; } 2>/dev/null || true
     fi
 
@@ -553,12 +564,47 @@ check_oracle() {
     if command -v oracle &> /dev/null; then
         ORACLE_CMD=("oracle")
         return 0
-    elif command -v npx &> /dev/null; then
+    elif [[ -z "${APR_NO_NPX:-}" ]] && command -v npx &> /dev/null; then
         ORACLE_CMD=("npx" "-y" "@steipete/oracle")
         return 0
     else
         return 1
     fi
+}
+
+oracle_detect_features() {
+    local mode="${1:-full}" # "full" (default) or "fast"
+
+    # Only detect once per process unless explicitly reset.
+    [[ "${ORACLE_FEATURES_DETECTED:-false}" == "true" ]] && return 0
+
+    ORACLE_SUPPORTS_NOTIFY=false
+
+    if [[ ${#ORACLE_CMD[@]} -eq 0 ]]; then
+        return 1
+    fi
+    # Avoid noisy "command not found" output in dry-run placeholder scenarios.
+    if ! command -v "${ORACLE_CMD[0]}" &>/dev/null; then
+        return 1
+    fi
+
+    # In fast mode, avoid triggering `npx -y @steipete/oracle --help` during dry-runs,
+    # which can unexpectedly download/install packages.
+    if [[ "$mode" == "fast" && "${ORACLE_CMD[0]}" == "npx" ]]; then
+        ORACLE_FEATURES_DETECTED=true
+        verbose "oracle_detect_features: skipping --help probe for npx in fast mode"
+        return 0
+    fi
+
+    if "${ORACLE_CMD[@]}" --help 2>&1 | grep -q -- '--notify'; then
+        ORACLE_SUPPORTS_NOTIFY=true
+        verbose "oracle_detect_features: Oracle supports --notify"
+    else
+        ORACLE_SUPPORTS_NOTIFY=false
+        verbose "oracle_detect_features: Oracle does not support --notify"
+    fi
+
+    ORACLE_FEATURES_DETECTED=true
 }
 
 # -----------------------------------------------------------------------------
@@ -596,13 +642,7 @@ preflight_check() {
     fi
 
     # Detect Oracle feature support (--notify may not exist in older versions)
-    if "${ORACLE_CMD[@]}" --help 2>&1 | grep -q -- '--notify'; then
-        ORACLE_SUPPORTS_NOTIFY=true
-        verbose "preflight: Oracle supports --notify"
-    else
-        ORACLE_SUPPORTS_NOTIFY=false
-        verbose "preflight: Oracle does not support --notify (older version)"
-    fi
+    oracle_detect_features || true
 
     # Check source files exist and are readable
     if [[ ! -f "$readme_path" ]]; then
@@ -1545,6 +1585,7 @@ metrics_write_convergence() {
 
     local ts merged
     ts=$(iso_timestamp)
+
     merged=$(jq -c \
         --argjson convergence "$convergence_json" \
         --arg ts "$ts" \
@@ -1661,7 +1702,13 @@ collect_document_metrics() {
         print_warning "Large $doc_type file (>1MB): $file_path"
     fi
 
-    heading_count=$(grep -c '^#' "$file_path" 2>/dev/null || true)
+    # Count headings (Atx style ^#+ ) but skip those inside fenced code blocks
+    heading_count=$(awk '
+        /^```/ { in_code = !in_code; next }
+        !in_code && /^#+ / { count++ }
+        END { print count+0 }
+    ' "$file_path" 2>/dev/null || echo 0)
+
     raw_code_blocks=$(grep -c '^```' "$file_path" 2>/dev/null || true)
     code_block_count=$((raw_code_blocks / 2))
     link_count=$({ grep -oE '\[([^\]]+)\]\([^)]+\)' "$file_path" 2>/dev/null || true; } | wc -l | tr -d ' ')
@@ -2531,6 +2578,16 @@ run_round() {
             print_info "Add 'template' or 'template_with_impl' to $config_path"
         fi
         return 1
+    fi
+
+    # Best-effort Oracle feature detection for accurate dry-run output and
+    # to enable optional flags when preflight is skipped.
+    if [[ "$render" != "true" ]]; then
+        if [[ "$dry_run" == "true" ]]; then
+            oracle_detect_features fast || true
+        else
+            oracle_detect_features || true
+        fi
     fi
 
     # Dry run mode
@@ -4589,7 +4646,7 @@ robot_status() {
     if command -v oracle &>/dev/null; then
         oracle_available=true
         oracle_method="global"
-    elif command -v npx &>/dev/null; then
+    elif [[ -z "${APR_NO_NPX:-}" ]] && command -v npx &>/dev/null; then
         oracle_available=true
         oracle_method="npx"
     fi
@@ -4652,7 +4709,8 @@ robot_workflows() {
 
 # Robot: Init - Initialize .apr directory
 robot_init() {
-    if [[ -d "$CONFIG_DIR" ]]; then
+    # Check if fully initialized
+    if [[ -d "$CONFIG_DIR" && -f "$CONFIG_DIR/config.yaml" ]]; then
         robot_json true "ok" '{"created":false,"existed":true}' "Already initialized"
         return 0
     fi
@@ -4663,9 +4721,11 @@ robot_init() {
         return 1
     fi
 
-    if ! echo "default_workflow: default" > "$CONFIG_DIR/config.yaml" 2>/dev/null; then
-        robot_json false "init_failed" '{"reason":"config_write"}' "Failed to write config file"
-        return 1
+    if [[ ! -f "$CONFIG_DIR/config.yaml" ]]; then
+        if ! echo "default_workflow: default" > "$CONFIG_DIR/config.yaml" 2>/dev/null; then
+            robot_json false "init_failed" '{"reason":"config_write"}' "Failed to write config file"
+            return 1
+        fi
     fi
 
     robot_json true "ok" '{"created":true,"existed":false}'
@@ -4714,8 +4774,10 @@ robot_validate() {
     fi
 
     # Check Oracle
-    if ! command -v oracle &>/dev/null && ! command -v npx &>/dev/null; then
-        errors+=("Oracle not available")
+    if ! command -v oracle &>/dev/null; then
+        if [[ -n "${APR_NO_NPX:-}" ]] || ! command -v npx &>/dev/null; then
+            errors+=("Oracle not available")
+        fi
     fi
 
     # Check for previous round if not round 1
@@ -4775,6 +4837,7 @@ robot_run() {
         robot_json false "dependency_missing" '{"dependency":"oracle"}' "Oracle not available"
         return 1
     fi
+    oracle_detect_features || true
 
     # Load workflow config
     local config_path="$CONFIG_DIR/workflows/$workflow.yaml"
@@ -5872,7 +5935,11 @@ main() {
         if ! check_oracle; then
             print_error "Oracle not found"
             print_info "Install with: npm install -g @steipete/oracle"
-            print_info "Or ensure npx is available"
+            if [[ -n "${APR_NO_NPX:-}" ]]; then
+                print_info "APR_NO_NPX is set; unset it to allow npx fallback"
+            else
+                print_info "Or ensure npx is available"
+            fi
             exit $EXIT_DEPENDENCY_ERROR
         fi
     else

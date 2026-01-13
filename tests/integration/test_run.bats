@@ -15,7 +15,7 @@ setup() {
     log_test_start "${BATS_TEST_NAME}"
 
     # Set up a complete test workflow
-    cd "$TEST_PROJECT"
+    cd "$TEST_PROJECT" || return 1
     setup_render_oracle
     setup_test_workflow "default"
 }
@@ -39,6 +39,12 @@ echo "Mock Oracle called with: $*" >&2
 
 if [[ "${1:-}" == "--version" ]]; then
     echo "oracle 0.0.0"
+    exit 0
+fi
+
+if [[ "${1:-}" == "--help" ]]; then
+    echo "Usage: oracle [options]"
+    echo "  --notify"
     exit 0
 fi
 
@@ -87,6 +93,12 @@ echo "Flaky Oracle args: $*" >&2
 
 if [[ "${1:-}" == "--version" ]]; then
     echo "oracle 0.0.0"
+    exit 0
+fi
+
+if [[ "${1:-}" == "--help" ]]; then
+    echo "Usage: oracle [options]"
+    echo "  --notify"
     exit 0
 fi
 
@@ -489,8 +501,8 @@ EOF
     setup_flaky_oracle
 
     # Export variables so they're available to the oracle subprocess
-    # Note: ORACLE_FAIL_UNTIL=2 because call 1 is the version check
-    export TEST_DIR APR_MAX_RETRIES=3 APR_INITIAL_BACKOFF=0 ORACLE_FAIL_UNTIL=2
+    # Note: ORACLE_FAIL_UNTIL=3 because calls 1/2 are --version/--help during preflight.
+    export TEST_DIR APR_MAX_RETRIES=3 APR_INITIAL_BACKOFF=0 ORACLE_FAIL_UNTIL=3
 
     # Clear any previous call count
     rm -f "$TEST_DIR/oracle_call_count"
@@ -666,11 +678,8 @@ EOF
     log_test_output "$output"
 
     assert_success
-    # --notify is conditionally included only if Oracle supports it.
-    # The dry-run output may contain "notify" in the command (if supported)
-    # or in the verbose output (feature detection message). Either way,
-    # the test passes if any flags are present (indicating Oracle args were built).
-    [[ "$output" == *"notify"* ]] || [[ "$output" == *"--"* ]]
+    # The mock Oracle advertises --notify in --help.
+    assert_output --partial "--notify"
 }
 
 @test "run --dry-run: includes engine browser flag" {
