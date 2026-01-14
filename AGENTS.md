@@ -213,7 +213,7 @@ Key Oracle features used:
 
 APR always uses `--browser-attachments never` to paste document contents directly into the chat. This is far more reliable than file uploads because:
 - File uploads can fail silently or trigger "duplicate file" errors
-- File uploads don't support placeholder interpolation
+- File uploads can trigger "you've already uploaded this file" rejections
 - Inline pasting works consistently for documents up to ~200KB
 
 Session management:

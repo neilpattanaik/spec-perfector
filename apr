@@ -2638,6 +2638,7 @@ run_round() {
     verbose "  Implementation: ${impl_path:-<not configured>}"
     verbose "  Model: $model"
     verbose "  Output dir: $output_dir"
+    verbose "  impl_every_n: ${impl_every_n:-<not configured>}"
 
     if [[ -z "$model" ]]; then
         print_error "Model not configured in $config_path"

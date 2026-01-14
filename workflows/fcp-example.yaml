@@ -16,7 +16,7 @@ documents:
   # The specification document being refined
   spec: FCP_Specification_V2.md
 
-  # Implementation reference (include every 3-4 rounds with --include-impl)
+  # Implementation reference (auto-included via impl_every_n below)
   implementation: docs/fcp_model_connectors_rust.md
 
 oracle:
