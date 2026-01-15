@@ -34,20 +34,15 @@ if echo "$staged_files" | grep -q '^install.sh$'; then
     install_staged_hash=$(git show :install.sh | sha256sum | awk '{print $1}')
 fi
 
-# Check if checksum files are also staged
+# Track if checksums need updating
 needs_update=false
-checksum_files_staged=false
-
-if echo "$staged_files" | grep -qE '^(apr\.sha256|install\.sh\.sha256|checksums\.txt|CHECKSUMS\.sha256)$'; then
-    checksum_files_staged=true
-fi
 
 # Verify apr checksum
 if [[ -n "$apr_staged_hash" ]]; then
     if echo "$staged_files" | grep -q '^apr.sha256$'; then
         stored_hash=$(git show :apr.sha256 | awk '{print $1}' | tr -d '[:space:]')
     else
-        stored_hash=$(cat apr.sha256 2>/dev/null | awk '{print $1}' | tr -d '[:space:]' || echo "")
+        stored_hash=$(awk '{print $1}' apr.sha256 2>/dev/null | tr -d '[:space:]' || echo "")
     fi
 
     if [[ "$apr_staged_hash" != "$stored_hash" ]]; then
@@ -63,7 +58,7 @@ if [[ -n "$install_staged_hash" ]]; then
     if echo "$staged_files" | grep -q '^install.sh.sha256$'; then
         stored_hash=$(git show :install.sh.sha256 | awk '{print $1}' | tr -d '[:space:]')
     else
-        stored_hash=$(cat install.sh.sha256 2>/dev/null | awk '{print $1}' | tr -d '[:space:]' || echo "")
+        stored_hash=$(awk '{print $1}' install.sh.sha256 2>/dev/null | tr -d '[:space:]' || echo "")
     fi
 
     if [[ "$install_staged_hash" != "$stored_hash" ]]; then
