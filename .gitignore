@@ -1,5 +1,7 @@
 # APR runtime
+.apr/
 .apr/rounds/
+round_*.fallback.md
 
 # OS
 .DS_Store

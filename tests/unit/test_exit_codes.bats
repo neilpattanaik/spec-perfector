@@ -70,20 +70,29 @@ load '../helpers/test_helper.bash'
 }
 
 @test "apr robot run without round number returns error" {
-    run "$APR_SCRIPT" robot run
+    capture_streams "$APR_SCRIPT" robot run --compact
+    status="$CAPTURED_STATUS"
+    output="$CAPTURED_STDOUT"
+
     # Robot mode returns JSON with ok:false for missing argument
-    # Exit code is 1 (general error) for robot mode errors
-    assert_exit_code 1
+    assert_exit_code 2
     assert_valid_json "$output"
     assert_json_value "$output" ".ok" "false"
+    assert_json_value "$output" ".code" "usage_error"
+    [[ "$CAPTURED_STDERR" == *"APR_ERROR_CODE=usage_error"* ]]
 }
 
 @test "apr robot validate without round number returns error" {
-    run "$APR_SCRIPT" robot validate
+    capture_streams "$APR_SCRIPT" robot validate --compact
+    status="$CAPTURED_STATUS"
+    output="$CAPTURED_STDOUT"
+
     # Robot mode returns JSON with ok:false for missing argument
-    assert_exit_code 1
+    assert_exit_code 2
     assert_valid_json "$output"
     assert_json_value "$output" ".ok" "false"
+    assert_json_value "$output" ".code" "usage_error"
+    [[ "$CAPTURED_STDERR" == *"APR_ERROR_CODE=usage_error"* ]]
 }
 
 # =============================================================================
@@ -169,27 +178,32 @@ load '../helpers/test_helper.bash'
     assert_json_value "$output" ".data.configured" "false"
 }
 
-@test "apr robot validate without config returns validation_failed code" {
+@test "apr robot validate without config returns not_configured code" {
     cd "$TEST_PROJECT"
     # No .apr directory
 
-    run "$APR_SCRIPT" robot validate 1
+    capture_streams "$APR_SCRIPT" robot validate 1 --compact
+    status="$CAPTURED_STATUS"
+    output="$CAPTURED_STDOUT"
 
-    # validate requires config, so it returns validation_failed
     assert_valid_json "$output"
     assert_json_value "$output" ".ok" "false"
-    assert_json_value "$output" ".code" "validation_failed"
+    assert_json_value "$output" ".code" "not_configured"
+    [[ "$CAPTURED_STDERR" == *"APR_ERROR_CODE=not_configured"* ]]
 }
 
 @test "apr robot workflows without config returns not_configured code" {
     cd "$TEST_PROJECT"
     # No .apr directory
 
-    run "$APR_SCRIPT" robot workflows
+    capture_streams "$APR_SCRIPT" robot workflows --compact
+    status="$CAPTURED_STATUS"
+    output="$CAPTURED_STDOUT"
 
     assert_valid_json "$output"
     assert_json_value "$output" ".ok" "false"
     assert_json_value "$output" ".code" "not_configured"
+    [[ "$CAPTURED_STDERR" == *"APR_ERROR_CODE=not_configured"* ]]
 }
 
 @test "apr robot init creates config and returns ok" {
@@ -217,12 +231,14 @@ load '../helpers/test_helper.bash'
     cd "$TEST_PROJECT"
     "$APR_SCRIPT" robot init >/dev/null
 
-    run "$APR_SCRIPT" robot validate 1 -w nonexistent
+    capture_streams "$APR_SCRIPT" robot validate 1 -w nonexistent --compact
+    status="$CAPTURED_STATUS"
+    output="$CAPTURED_STDOUT"
 
     assert_valid_json "$output"
     assert_json_value "$output" ".ok" "false"
-    # Could be not_found or validation_failed
-    [[ $(echo "$output" | jq -r '.code') =~ ^(not_found|validation_failed)$ ]]
+    assert_json_value "$output" ".code" "validation_failed"
+    [[ "$CAPTURED_STDERR" == *"APR_ERROR_CODE=validation_failed"* ]]
 }
 
 # =============================================================================

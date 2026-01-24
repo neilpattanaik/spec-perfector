@@ -199,38 +199,18 @@ rounds:
   output_dir: .apr/rounds/$workflow
 
 template: |
-  First, read this README:
+  First, read the attached README.md.
 
-  <readme>
-  {{README}}
-  </readme>
-
-  Now read the specification:
-
-  <spec>
-  {{SPEC}}
-  </spec>
+  Now read the attached SPECIFICATION.md.
 
   Please analyze and provide feedback.
 
 template_with_impl: |
-  First, read this README:
+  First, read the attached README.md.
 
-  <readme>
-  {{README}}
-  </readme>
+  Now read the attached SPECIFICATION.md.
 
-  Now read the specification:
-
-  <spec>
-  {{SPEC}}
-  </spec>
-
-  And the implementation:
-
-  <implementation>
-  {{IMPL}}
-  </implementation>
+  And the attached IMPLEMENTATION.md.
 
   Please analyze and provide feedback.
 EOF

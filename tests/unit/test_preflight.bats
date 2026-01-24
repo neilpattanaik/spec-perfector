@@ -28,9 +28,27 @@ create_docs() {
     local dir="${1:-$TEST_PROJECT}"
     mkdir -p "$dir"
 
-    printf '%s\n' "# README" > "$dir/README.md"
-    printf '%s\n' "# SPEC" > "$dir/SPEC.md"
-    printf '%s\n' "# IMPL" > "$dir/IMPL.md"
+    # Keep fixtures comfortably above preflight "suspiciously small" thresholds.
+    cat > "$dir/README.md" <<'EOF'
+# README
+
+This is a test README for APR preflight unit tests.
+It is intentionally long enough to avoid size warnings.
+EOF
+
+    cat > "$dir/SPEC.md" <<'EOF'
+# SPEC
+
+This is a test spec for APR preflight unit tests.
+It is intentionally long enough to avoid size warnings.
+EOF
+
+    cat > "$dir/IMPL.md" <<'EOF'
+# IMPL
+
+This is a test implementation doc for APR preflight unit tests.
+It is intentionally long enough to avoid size warnings.
+EOF
 
     log_test_step "fixture" "Created test docs in $dir"
 }
@@ -84,6 +102,11 @@ create_path_without_oracle() {
     ln -s "$(command -v jq)" "$mock_bin/jq"
     ln -s "$(command -v awk)" "$mock_bin/awk"
     ln -s "$(command -v date)" "$mock_bin/date"
+    # Keep enough coreutils available for test helpers (capture_streams, logging).
+    ln -s "$(command -v mktemp)" "$mock_bin/mktemp"
+    ln -s "$(command -v mkdir)" "$mock_bin/mkdir"
+    ln -s "$(command -v rm)" "$mock_bin/rm"
+    ln -s "$(command -v cat)" "$mock_bin/cat"
 
     echo "$mock_bin"
 }
@@ -284,33 +307,37 @@ assert_json_array_contains() {
 # robot_validate() Tests
 # =============================================================================
 
-@test "robot_validate: missing round number returns validation_failed" {
-    run robot_validate
+@test "robot_validate: missing round number returns usage_error" {
+    capture_streams robot_validate
 
-    assert_valid_json "$output"
-    assert_json_value "$output" ".ok" "false"
-    assert_json_value "$output" ".code" "validation_failed"
-    assert_json_array_contains "$output" ".data.errors" "Round number required"
+    assert_valid_json "$CAPTURED_STDOUT"
+    assert_json_value "$CAPTURED_STDOUT" ".ok" "false"
+    assert_json_value "$CAPTURED_STDOUT" ".code" "usage_error"
+    assert_json_array_contains "$CAPTURED_STDOUT" ".data.errors" "Round number required"
+    [[ "$CAPTURED_STDERR" == *"APR_ERROR_CODE=usage_error"* ]]
 }
 
-@test "robot_validate: not initialized returns validation_failed" {
-    run robot_validate 1
+@test "robot_validate: not initialized returns not_configured" {
+    capture_streams robot_validate 1
 
-    assert_valid_json "$output"
-    assert_json_value "$output" ".ok" "false"
-    assert_json_value "$output" ".code" "validation_failed"
-    assert_json_array_contains "$output" ".data.errors" "Not initialized - run 'apr robot init'"
+    assert_valid_json "$CAPTURED_STDOUT"
+    assert_json_value "$CAPTURED_STDOUT" ".ok" "false"
+    assert_json_value "$CAPTURED_STDOUT" ".code" "not_configured"
+    assert_json_array_contains "$CAPTURED_STDOUT" ".data.errors" "Not initialized - run 'apr robot init'"
+    [[ "$CAPTURED_STDERR" == *"APR_ERROR_CODE=not_configured"* ]]
 }
 
 @test "robot_validate: workflow not found returns validation_failed" {
     mkdir -p ".apr/workflows"
     echo "default_workflow: default" > ".apr/config.yaml"
 
-    run robot_validate 1
+    capture_streams robot_validate 1
 
-    assert_valid_json "$output"
-    assert_json_value "$output" ".ok" "false"
-    assert_json_array_contains "$output" ".data.errors" "Workflow 'default' not found"
+    assert_valid_json "$CAPTURED_STDOUT"
+    assert_json_value "$CAPTURED_STDOUT" ".ok" "false"
+    assert_json_value "$CAPTURED_STDOUT" ".code" "validation_failed"
+    assert_json_array_contains "$CAPTURED_STDOUT" ".data.errors" "Workflow 'default' not found"
+    [[ "$CAPTURED_STDERR" == *"APR_ERROR_CODE=validation_failed"* ]]
 }
 
 @test "robot_validate: README missing populates errors" {
@@ -318,23 +345,27 @@ assert_json_array_contains() {
     write_workflow_config "$TEST_PROJECT/MISSING_README.md" "$TEST_PROJECT/SPEC.md"
     setup_mock_oracle
 
-    run robot_validate 1
+    capture_streams robot_validate 1
 
-    assert_valid_json "$output"
-    assert_json_value "$output" ".ok" "false"
-    assert_json_array_contains "$output" ".data.errors" "README not found: $TEST_PROJECT/MISSING_README.md"
+    assert_valid_json "$CAPTURED_STDOUT"
+    assert_json_value "$CAPTURED_STDOUT" ".ok" "false"
+    assert_json_value "$CAPTURED_STDOUT" ".code" "validation_failed"
+    assert_json_array_contains "$CAPTURED_STDOUT" ".data.errors" "README not found: $TEST_PROJECT/MISSING_README.md"
+    [[ "$CAPTURED_STDERR" == *"APR_ERROR_CODE=validation_failed"* ]]
 }
 
-@test "robot_validate: Spec missing populates errors" {
+@test "robot_validate: spec missing populates errors" {
     printf '%s\n' "# README" > "$TEST_PROJECT/README.md"
     write_workflow_config "$TEST_PROJECT/README.md" "$TEST_PROJECT/MISSING_SPEC.md"
     setup_mock_oracle
 
-    run robot_validate 1
+    capture_streams robot_validate 1
 
-    assert_valid_json "$output"
-    assert_json_value "$output" ".ok" "false"
-    assert_json_array_contains "$output" ".data.errors" "Spec not found: $TEST_PROJECT/MISSING_SPEC.md"
+    assert_valid_json "$CAPTURED_STDOUT"
+    assert_json_value "$CAPTURED_STDOUT" ".ok" "false"
+    assert_json_value "$CAPTURED_STDOUT" ".code" "validation_failed"
+    assert_json_array_contains "$CAPTURED_STDOUT" ".data.errors" "Spec not found: $TEST_PROJECT/MISSING_SPEC.md"
+    [[ "$CAPTURED_STDERR" == *"APR_ERROR_CODE=validation_failed"* ]]
 }
 
 @test "robot_validate: oracle missing populates errors" {
@@ -347,14 +378,16 @@ assert_json_array_contains() {
     PATH="$mock_path"
     export PATH
 
-    run robot_validate 1
+    capture_streams robot_validate 1
 
     PATH="$original_path"
     export PATH
 
-    assert_valid_json "$output"
-    assert_json_value "$output" ".ok" "false"
-    assert_json_array_contains "$output" ".data.errors" "Oracle not available"
+    assert_valid_json "$CAPTURED_STDOUT"
+    assert_json_value "$CAPTURED_STDOUT" ".ok" "false"
+    assert_json_value "$CAPTURED_STDOUT" ".code" "validation_failed"
+    assert_json_array_contains "$CAPTURED_STDOUT" ".data.errors" "Oracle not available"
+    [[ "$CAPTURED_STDERR" == *"APR_ERROR_CODE=validation_failed"* ]]
 }
 
 @test "robot_validate: previous round missing yields warnings but ok true" {
@@ -362,11 +395,12 @@ assert_json_array_contains() {
     write_workflow_config "$TEST_PROJECT/README.md" "$TEST_PROJECT/SPEC.md"
     setup_mock_oracle
 
-    run robot_validate 2
+    capture_streams robot_validate 2
 
-    assert_valid_json "$output"
-    assert_json_value "$output" ".ok" "true"
-    assert_json_array_contains "$output" ".data.warnings" "Previous round 1 not found - starting fresh?"
+    assert_valid_json "$CAPTURED_STDOUT"
+    assert_json_value "$CAPTURED_STDOUT" ".ok" "true"
+    assert_json_array_contains "$CAPTURED_STDOUT" ".data.warnings" "Previous round 1 not found - starting fresh?"
+    [[ -z "$CAPTURED_STDERR" ]]
 }
 
 @test "robot_validate: all valid returns ok true" {
@@ -374,9 +408,10 @@ assert_json_array_contains() {
     write_workflow_config "$TEST_PROJECT/README.md" "$TEST_PROJECT/SPEC.md" "$TEST_PROJECT/IMPL.md"
     setup_mock_oracle
 
-    run robot_validate 1
+    capture_streams robot_validate 1
 
-    assert_valid_json "$output"
-    assert_json_value "$output" ".ok" "true"
-    assert_json_value "$output" ".code" "ok"
+    assert_valid_json "$CAPTURED_STDOUT"
+    assert_json_value "$CAPTURED_STDOUT" ".ok" "true"
+    assert_json_value "$CAPTURED_STDOUT" ".code" "ok"
+    [[ -z "$CAPTURED_STDERR" ]]
 }

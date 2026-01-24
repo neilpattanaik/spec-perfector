@@ -85,14 +85,15 @@ teardown() {
 }
 
 @test "apr robot validate: error when missing round" {
-    run "$APR_SCRIPT" robot validate
+    capture_streams "$APR_SCRIPT" robot validate --compact
+    log_test_actual "stdout" "$CAPTURED_STDOUT"
+    log_test_actual "stderr" "$CAPTURED_STDERR"
 
-    log_test_output "$output"
-
-    assert_failure
-    assert_valid_json "$output"
-    assert_json_value "$output" ".ok" "false"
-    assert_json_value "$output" ".code" "validation_failed"
+    [[ "$CAPTURED_STATUS" -ne 0 ]]
+    assert_valid_json "$CAPTURED_STDOUT"
+    assert_json_value "$CAPTURED_STDOUT" ".ok" "false"
+    assert_json_value "$CAPTURED_STDOUT" ".code" "usage_error"
+    [[ "$CAPTURED_STDERR" == *"APR_ERROR_CODE=usage_error"* ]]
 }
 
 # =============================================================================
@@ -127,7 +128,9 @@ teardown() {
     setup_mock_oracle
     setup_test_workflow "robot"
 
-    export MOCK_ORACLE_SLEEP=3
+    # Keep the mock Oracle process alive long enough that the second run
+    # deterministically overlaps (avoid flakiness on slow CI machines).
+    export MOCK_ORACLE_SLEEP=10
 
     capture_streams "$APR_SCRIPT" robot run 1 -w robot --compact
     log_test_actual "first stdout" "$CAPTURED_STDOUT"
@@ -142,7 +145,8 @@ teardown() {
     [[ "$CAPTURED_STATUS" -ne 0 ]]
     assert_valid_json "$CAPTURED_STDOUT"
     assert_json_value "$CAPTURED_STDOUT" ".ok" "false"
-    assert_json_value "$CAPTURED_STDOUT" ".code" "already_exists"
+    assert_json_value "$CAPTURED_STDOUT" ".code" "busy"
+    [[ "$CAPTURED_STDERR" == *"APR_ERROR_CODE=busy"* ]]
 }
 
 @test "apr robot history: returns rounds list" {
@@ -160,17 +164,18 @@ teardown() {
     assert_json_value "$output" ".data.rounds[0].round" "1"
 }
 
-@test "apr robot stats: returns not_found when metrics missing" {
+@test "apr robot stats: returns validation_failed when metrics missing" {
     setup_test_workflow "robot"
+    capture_streams "$APR_SCRIPT" robot stats -w robot --compact
 
-    run "$APR_SCRIPT" robot stats -w robot
+    log_test_actual "stdout" "$CAPTURED_STDOUT"
+    log_test_actual "stderr" "$CAPTURED_STDERR"
 
-    log_test_output "$output"
-
-    assert_failure
-    assert_valid_json "$output"
-    assert_json_value "$output" ".ok" "false"
-    assert_json_value "$output" ".code" "not_found"
+    [[ "$CAPTURED_STATUS" -ne 0 ]]
+    assert_valid_json "$CAPTURED_STDOUT"
+    assert_json_value "$CAPTURED_STDOUT" ".ok" "false"
+    assert_json_value "$CAPTURED_STDOUT" ".code" "validation_failed"
+    [[ "$CAPTURED_STDERR" == *"APR_ERROR_CODE=validation_failed"* ]]
 }
 
 # =============================================================================
@@ -207,17 +212,18 @@ teardown() {
     echo "$output" | jq -e '.data.path' >/dev/null
 }
 
-@test "apr robot show: returns not_found for missing round" {
+@test "apr robot show: returns usage_error for missing round" {
     setup_test_workflow "robot"
+    capture_streams "$APR_SCRIPT" robot show 99 -w robot --compact
 
-    run "$APR_SCRIPT" robot show 99 -w robot
+    log_test_actual "stdout" "$CAPTURED_STDOUT"
+    log_test_actual "stderr" "$CAPTURED_STDERR"
 
-    log_test_output "$output"
-
-    assert_failure
-    assert_valid_json "$output"
-    assert_json_value "$output" ".ok" "false"
-    assert_json_value "$output" ".code" "not_found"
+    [[ "$CAPTURED_STATUS" -ne 0 ]]
+    assert_valid_json "$CAPTURED_STDOUT"
+    assert_json_value "$CAPTURED_STDOUT" ".ok" "false"
+    assert_json_value "$CAPTURED_STDOUT" ".code" "usage_error"
+    [[ "$CAPTURED_STDERR" == *"APR_ERROR_CODE=usage_error"* ]]
 }
 
 # =============================================================================
@@ -271,17 +277,19 @@ teardown() {
     assert_json_value "$output" ".data.comparing.to" "3"
 }
 
-@test "apr robot diff: fails for round 1 without comparison" {
+@test "apr robot diff: fails with usage_error for round 1 without comparison" {
     setup_test_workflow "robot"
     create_mock_round 1 "robot"
+    capture_streams "$APR_SCRIPT" robot diff 1 -w robot --compact
 
-    run "$APR_SCRIPT" robot diff 1 -w robot
+    log_test_actual "stdout" "$CAPTURED_STDOUT"
+    log_test_actual "stderr" "$CAPTURED_STDERR"
 
-    log_test_output "$output"
-
-    assert_failure
-    assert_json_value "$output" ".ok" "false"
-    assert_json_value "$output" ".code" "invalid_argument"
+    [[ "$CAPTURED_STATUS" -ne 0 ]]
+    assert_valid_json "$CAPTURED_STDOUT"
+    assert_json_value "$CAPTURED_STDOUT" ".ok" "false"
+    assert_json_value "$CAPTURED_STDOUT" ".code" "usage_error"
+    [[ "$CAPTURED_STDERR" == *"APR_ERROR_CODE=usage_error"* ]]
 }
 
 # =============================================================================
@@ -331,16 +339,18 @@ teardown() {
     echo "$output" | jq -e '.data.stats.prompt_chars' >/dev/null
 }
 
-@test "apr robot integrate: fails for missing round" {
+@test "apr robot integrate: fails with usage_error for missing round" {
     setup_test_workflow "robot"
+    capture_streams "$APR_SCRIPT" robot integrate 99 -w robot --compact
 
-    run "$APR_SCRIPT" robot integrate 99 -w robot
+    log_test_actual "stdout" "$CAPTURED_STDOUT"
+    log_test_actual "stderr" "$CAPTURED_STDERR"
 
-    log_test_output "$output"
-
-    assert_failure
-    assert_json_value "$output" ".ok" "false"
-    assert_json_value "$output" ".code" "not_found"
+    [[ "$CAPTURED_STATUS" -ne 0 ]]
+    assert_valid_json "$CAPTURED_STDOUT"
+    assert_json_value "$CAPTURED_STDOUT" ".ok" "false"
+    assert_json_value "$CAPTURED_STDOUT" ".code" "usage_error"
+    [[ "$CAPTURED_STDERR" == *"APR_ERROR_CODE=usage_error"* ]]
 }
 
 # =============================================================================
