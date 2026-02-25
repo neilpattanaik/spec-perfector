@@ -1505,6 +1505,25 @@ yaml_unquote() {
     printf '%s' "$value"
 }
 
+# Normalize YAML boolean strings with a default-true policy.
+# Empty or unknown values resolve to "true"; explicit false-like values disable.
+config_bool_default_true() {
+    local raw="${1:-}"
+    local normalized=""
+    normalized=$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')
+    case "$normalized" in
+        ""|true|1|yes|on)
+            printf 'true'
+            ;;
+        false|0|no|off)
+            printf 'false'
+            ;;
+        *)
+            printf 'true'
+            ;;
+    esac
+}
+
 # Extract a YAML block scalar (| or >) for a given key.
 # Returns block contents via stdout, or empty if not found.
 get_yaml_block() {
@@ -2939,7 +2958,7 @@ documents:
 
 oracle:
   model: "$model"
-  thinking_time: heavy
+  browser_hide_window: true
 
 rounds:
   output_dir: $(yaml_quote "$CONFIG_DIR/rounds/$workflow_name")
@@ -3019,6 +3038,7 @@ run_round() {
 
     # Parse config (simple grep-based for now)
     local readme_path spec_path impl_path model output_dir impl_every_n thinking_time
+    local browser_hide_window_raw browser_hide_window
     readme_path=$(yaml_unquote "$(get_config_value "readme" "$config_path")")
     spec_path=$(yaml_unquote "$(get_config_value "spec" "$config_path")")
     impl_path=$(yaml_unquote "$(get_config_value "implementation" "$config_path")")
@@ -3026,6 +3046,8 @@ run_round() {
     output_dir=$(yaml_unquote "$(get_config_value "output_dir" "$config_path")")
     impl_every_n=$(yaml_unquote "$(get_config_value "impl_every_n" "$config_path")")
     thinking_time=$(yaml_unquote "$(get_config_value "thinking_time" "$config_path")")
+    browser_hide_window_raw=$(yaml_unquote "$(get_config_value "browser_hide_window" "$config_path")")
+    browser_hide_window=$(config_bool_default_true "$browser_hide_window_raw")
 
     # Auto-include implementation every N rounds if configured
     if [[ -n "$impl_every_n" && "$impl_every_n" =~ ^[0-9]+$ && "$impl_every_n" -gt 0 ]]; then
@@ -3054,7 +3076,13 @@ run_round() {
     verbose "  Model: $model"
     verbose "  Output dir: $output_dir"
     verbose "  impl_every_n: ${impl_every_n:-<not configured>}"
-    verbose "  thinking_time: ${thinking_time:-<not configured>}"
+    verbose "  thinking_time (legacy, ignored): ${thinking_time:-<not configured>}"
+    verbose "  browser_hide_window: $browser_hide_window"
+
+    if [[ -n "$thinking_time" ]]; then
+        print_warning "oracle.thinking_time is deprecated and ignored: '$thinking_time'"
+        print_info "Remove 'oracle.thinking_time' from $config_path"
+    fi
 
     if [[ -z "$model" ]]; then
         print_error "Model not configured in $config_path"
@@ -3209,8 +3237,8 @@ run_round() {
         echo "    --write-output \"$output_file\" \\" >&2
         [[ "$manual_login" == "true" ]] && echo "    --browser-manual-login \\" >&2
         [[ "$keep_browser" == "true" ]] && echo "    --browser-keep-browser \\" >&2
+        [[ "$browser_hide_window" == "true" ]] && echo "    --browser-hide-window \\" >&2
         [[ "$ORACLE_SUPPORTS_NOTIFY" == "true" ]] && echo "    --notify \\" >&2
-        [[ -n "$thinking_time" ]] && echo "    --browser-thinking-time \"$thinking_time\" \\" >&2
         echo "    --heartbeat 30 \\" >&2
         echo "    -p \"<prompt>\"" >&2
         exit $EXIT_SUCCESS
@@ -3248,7 +3276,7 @@ run_round() {
     [[ "$ORACLE_SUPPORTS_NOTIFY" == "true" ]] && oracle_args+=(--notify)
     [[ "$manual_login" == "true" ]] && oracle_args+=(--browser-manual-login)
     [[ "$keep_browser" == "true" ]] && oracle_args+=(--browser-keep-browser)
-    [[ -n "$thinking_time" ]] && oracle_args+=(--browser-thinking-time "$thinking_time")
+    [[ "$browser_hide_window" == "true" ]] && oracle_args+=(--browser-hide-window)
     oracle_args+=(-p "$prompt")
 
     verbose "Oracle command: ${ORACLE_CMD[*]} ${oracle_args[*]}"
@@ -5667,12 +5695,15 @@ robot_run() {
 
     # Parse config
     local readme_path spec_path impl_path model output_dir impl_every_n
+    local browser_hide_window_raw browser_hide_window
     readme_path=$(yaml_unquote "$(get_config_value "readme" "$config_path")")
     spec_path=$(yaml_unquote "$(get_config_value "spec" "$config_path")")
     impl_path=$(yaml_unquote "$(get_config_value "implementation" "$config_path")")
     model=$(yaml_unquote "$(get_config_value "model" "$config_path")")
     output_dir=$(yaml_unquote "$(get_config_value "output_dir" "$config_path")")
     impl_every_n=$(yaml_unquote "$(get_config_value "impl_every_n" "$config_path")")
+    browser_hide_window_raw=$(yaml_unquote "$(get_config_value "browser_hide_window" "$config_path")")
+    browser_hide_window=$(config_bool_default_true "$browser_hide_window_raw")
 
     # Auto-include implementation every N rounds if configured
     if [[ -n "$impl_every_n" && "$impl_every_n" =~ ^[0-9]+$ && "$impl_every_n" -gt 0 ]]; then
@@ -5777,6 +5808,7 @@ robot_run() {
     )
 
     [[ "$ORACLE_SUPPORTS_NOTIFY" == "true" ]] && oracle_args+=(--notify)
+    [[ "$browser_hide_window" == "true" ]] && oracle_args+=(--browser-hide-window)
 
     verbose "robot_run Oracle command: ${ORACLE_CMD[*]} ${oracle_args[*]}"
     verbose "robot_run output_file: $output_file"

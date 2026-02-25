@@ -692,6 +692,27 @@ EOF
     [[ "$output" == *"browser"* ]] || [[ "$output" == *"engine"* ]] || [[ "$output" == *"oracle"* ]]
 }
 
+@test "run --dry-run: warns and ignores legacy oracle.thinking_time" {
+    local tmp_cfg="$TEST_DIR/default_with_legacy_thinking_time.yaml"
+    awk '
+        {
+            print
+            if ($0 ~ /^[[:space:]]*model:[[:space:]]*"/) {
+                print "  thinking_time: heavy"
+            }
+        }
+    ' .apr/workflows/default.yaml > "$tmp_cfg"
+    mv "$tmp_cfg" .apr/workflows/default.yaml
+
+    run "$APR_SCRIPT" run 1 --dry-run
+
+    log_test_output "$output"
+
+    assert_success
+    assert_output --partial "oracle.thinking_time is deprecated and ignored"
+    [[ "$output" != *"--browser-thinking-time"* ]]
+}
+
 # =============================================================================
 # Error Handling Tests
 # =============================================================================

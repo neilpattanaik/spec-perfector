@@ -196,7 +196,6 @@ documents:
 
 oracle:
   model: "5.2 Thinking"
-  thinking_time: heavy
 
 rounds:
   output_dir: .apr/rounds/$workflow
