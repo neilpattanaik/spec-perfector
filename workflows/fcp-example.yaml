@@ -34,6 +34,14 @@ rounds:
   # Set to 0 or omit to disable (use --include-impl manually)
   impl_every_n: 4
 
+# Optional auto-loop controls (used by `apr auto` / `apr loop`)
+# Agent choices: claude, codex, gemini, shell, noop
+auto_integration_agent: claude
+# Reads stdin by default; include {prompt} if your command needs the prompt path:
+# auto_integration_command: "your non-interactive command --input {prompt}"
+auto_convergence_threshold: 0.80
+auto_max_iterations: 6
+
 # Custom prompt template
 # The standard template works for most cases, but you can customize here
 template: |

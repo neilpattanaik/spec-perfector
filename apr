@@ -19,6 +19,8 @@
 #
 # Commands:
 #   run <round>        Run a revision round (default command)
+#   auto <round>       Run autonomous loop (run -> integrate -> next round)
+#   loop <round>       Alias for auto
 #   setup              Interactive workflow setup wizard
 #   status             Check Oracle session status
 #   attach <session>   Attach to a running/completed session
@@ -41,6 +43,10 @@
 #   --no-preflight     Skip pre-flight checks (not recommended)
 #   --retry            Enable Oracle retries (default)
 #   --no-retry         Disable Oracle retries
+#   --integration-agent AGENT   Auto mode integration agent (claude|codex|gemini|shell|noop)
+#   --integration-command CMD   Auto mode integration command (stdin or {prompt})
+#   --convergence-threshold N   Auto mode stop threshold (0..1)
+#   --max-iterations N          Auto mode iteration cap (>=1)
 #   -q, --quiet        Minimal output (errors only)
 #   -v, --verbose      Verbose logging (debug)
 #   --version          Show version
@@ -50,6 +56,10 @@
 #   APR_CACHE          Cache directory (default: ~/.cache/apr)
 #   APR_CHECK_UPDATES  Enable daily update check (set to 1)
 #   APR_NO_GUM         Disable gum even if available
+#   APR_AUTO_INTEGRATION_AGENT    Default auto integration agent
+#   APR_AUTO_INTEGRATION_COMMAND  Default auto integration command
+#   APR_AUTO_CONVERGENCE_THRESHOLD Default auto stop threshold (0..1)
+#   APR_AUTO_MAX_ITERATIONS       Default auto iteration cap (>=1)
 #   NO_COLOR           Disable colors (accessibility)
 #
 #   Oracle Stability Thresholds (prevent truncation with GPT Pro Extended Thinking):
@@ -87,6 +97,10 @@ readonly EXIT_CONFIG_ERROR=4      # Invalid config, missing files
 readonly EXIT_NETWORK_ERROR=10    # Timeout, DNS, unreachable
 readonly EXIT_UPDATE_ERROR=11     # Self-update failed
 readonly EXIT_BUSY_ERROR=12       # Single-flight / busy (e.g. lock already held)
+
+# Auto mode defaults (used only by `apr auto`)
+readonly AUTO_DEFAULT_CONVERGENCE_THRESHOLD="0.75"
+readonly AUTO_DEFAULT_MAX_ITERATIONS=5
 
 # -----------------------------------------------------------------------------
 # Error code taxonomy (robot `.code`) and mapping to exit codes
@@ -142,6 +156,12 @@ QUIET_MODE=false
 
 # Verbose mode flag (for debugging)
 VERBOSE="${APR_VERBOSE:-false}"
+
+# Auto mode option overrides (CLI > env > workflow config > defaults)
+AUTO_INTEGRATION_AGENT_OVERRIDE=""
+AUTO_INTEGRATION_COMMAND_OVERRIDE=""
+AUTO_CONVERGENCE_THRESHOLD_OVERRIDE=""
+AUTO_MAX_ITERATIONS_OVERRIDE=""
 
 # Configuration (XDG-compliant with overrides)
 APR_HOME="${APR_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/apr}"
@@ -365,6 +385,27 @@ iso_timestamp() {
 
 is_non_negative_int() {
     [[ "${1:-}" =~ ^[0-9]+$ ]]
+}
+
+is_positive_int() {
+    [[ "${1:-}" =~ ^[1-9][0-9]*$ ]]
+}
+
+is_fraction_0_to_1() {
+    local value="${1:-}"
+    if [[ -z "$value" ]]; then
+        return 1
+    fi
+    if ! [[ "$value" =~ ^([0-9]+([.][0-9]+)?|[.][0-9]+)$ ]]; then
+        return 1
+    fi
+    awk -v v="$value" 'BEGIN { exit !(v >= 0 && v <= 1) }'
+}
+
+float_ge() {
+    local left="${1:-0}"
+    local right="${2:-0}"
+    awk -v a="$left" -v b="$right" 'BEGIN { exit !(a >= b) }'
 }
 
 is_valid_workflow_name() {
@@ -3957,6 +3998,348 @@ EOF
 }
 
 # -----------------------------------------------------------------------------
+# Auto Mode - Continuous run -> integrate loop
+# -----------------------------------------------------------------------------
+
+# Resolved per-invocation auto settings
+AUTO_INTEGRATION_AGENT=""
+AUTO_INTEGRATION_COMMAND=""
+AUTO_CONVERGENCE_THRESHOLD=""
+AUTO_MAX_ITERATIONS=""
+
+auto_resolve_settings() {
+    local workflow_config="$1"
+
+    local cfg_agent cfg_command cfg_threshold cfg_max
+    cfg_agent=$(yaml_unquote "$(get_config_value "auto_integration_agent" "$workflow_config")")
+    cfg_command=$(yaml_unquote "$(get_config_value "auto_integration_command" "$workflow_config")")
+    cfg_threshold=$(yaml_unquote "$(get_config_value "auto_convergence_threshold" "$workflow_config")")
+    cfg_max=$(yaml_unquote "$(get_config_value "auto_max_iterations" "$workflow_config")")
+
+    AUTO_INTEGRATION_AGENT="${AUTO_INTEGRATION_AGENT_OVERRIDE:-${APR_AUTO_INTEGRATION_AGENT:-$cfg_agent}}"
+    AUTO_INTEGRATION_COMMAND="${AUTO_INTEGRATION_COMMAND_OVERRIDE:-${APR_AUTO_INTEGRATION_COMMAND:-$cfg_command}}"
+    AUTO_CONVERGENCE_THRESHOLD="${AUTO_CONVERGENCE_THRESHOLD_OVERRIDE:-${APR_AUTO_CONVERGENCE_THRESHOLD:-${cfg_threshold:-$AUTO_DEFAULT_CONVERGENCE_THRESHOLD}}}"
+    AUTO_MAX_ITERATIONS="${AUTO_MAX_ITERATIONS_OVERRIDE:-${APR_AUTO_MAX_ITERATIONS:-${cfg_max:-$AUTO_DEFAULT_MAX_ITERATIONS}}}"
+
+    AUTO_INTEGRATION_AGENT=$(printf '%s' "$AUTO_INTEGRATION_AGENT" | tr '[:upper:]' '[:lower:]')
+    case "$AUTO_INTEGRATION_AGENT" in
+        claude-code)
+            AUTO_INTEGRATION_AGENT="claude"
+            ;;
+        command)
+            AUTO_INTEGRATION_AGENT="shell"
+            ;;
+    esac
+
+    if [[ -z "$AUTO_INTEGRATION_AGENT" ]]; then
+        print_error "Auto mode requires integration agent selection"
+        print_info "Set auto_integration_agent in workflow or pass --integration-agent"
+        return 1
+    fi
+
+    case "$AUTO_INTEGRATION_AGENT" in
+        shell|claude|codex|gemini|noop)
+            ;;
+        *)
+            print_error "Unsupported integration agent: $AUTO_INTEGRATION_AGENT"
+            print_info "Supported agents: claude, codex, gemini, shell, noop"
+            return 1
+            ;;
+    esac
+
+    if [[ "$AUTO_INTEGRATION_AGENT" == "shell" && -z "$AUTO_INTEGRATION_COMMAND" ]]; then
+        print_error "integration agent 'shell' requires a command"
+        print_info "Set auto_integration_command in workflow or pass --integration-command"
+        return 1
+    fi
+
+    if [[ "$AUTO_INTEGRATION_AGENT" == "codex" && -z "$AUTO_INTEGRATION_COMMAND" ]]; then
+        print_error "integration agent 'codex' requires a non-interactive command"
+        print_info "Use --integration-command with a codex command that can read stdin or {prompt}"
+        return 1
+    fi
+
+    if [[ "$AUTO_INTEGRATION_AGENT" == "gemini" && -z "$AUTO_INTEGRATION_COMMAND" ]]; then
+        print_error "integration agent 'gemini' requires a non-interactive command"
+        print_info "Use --integration-command with a gemini command that can read stdin or {prompt}"
+        print_info "Set auto_integration_command in workflow or pass --integration-command"
+        return 1
+    fi
+
+    if ! is_fraction_0_to_1 "$AUTO_CONVERGENCE_THRESHOLD"; then
+        print_error "Invalid auto convergence threshold: $AUTO_CONVERGENCE_THRESHOLD"
+        print_info "Use a numeric value between 0 and 1 (inclusive)"
+        return 1
+    fi
+
+    if ! is_positive_int "$AUTO_MAX_ITERATIONS"; then
+        print_error "Invalid auto max iterations: $AUTO_MAX_ITERATIONS"
+        print_info "Use a positive integer (>= 1)"
+        return 1
+    fi
+
+    return 0
+}
+
+auto_generate_integration_prompt() {
+    local round_num="$1"
+    local workflow="$2"
+    local apr_cli="$3"
+    local prompt_dir="$CONFIG_DIR/auto/$workflow"
+    local prompt_file="$prompt_dir/round_${round_num}_integration_prompt.md"
+
+    if ! mkdir -p "$prompt_dir"; then
+        print_error "Failed to create auto prompt directory: $prompt_dir"
+        return 1
+    fi
+
+    local cmd=("$apr_cli" integrate "$round_num" --workflow "$workflow" --output "$prompt_file" --quiet)
+    "${cmd[@]}" >/dev/null 2>&1
+    local rc=$?
+    if [[ $rc -ne 0 ]]; then
+        print_error "Failed to generate integration prompt for round $round_num"
+        return $rc
+    fi
+
+    echo "$prompt_file"
+    return 0
+}
+
+auto_run_integration_command() {
+    local command_template="$1"
+    local prompt_file="$2"
+    local round_num="$3"
+    local workflow="$4"
+    local command_to_run="$command_template"
+
+    # Support command templates that need the prompt path directly.
+    # If {prompt} is absent, pass prompt content on stdin for compatibility.
+    if [[ "$command_template" == *"{prompt}"* ]]; then
+        local escaped_prompt_path
+        printf -v escaped_prompt_path '%q' "$prompt_file"
+        command_to_run="${command_template//\{prompt\}/$escaped_prompt_path}"
+        APR_AUTO_PROMPT_FILE="$prompt_file" \
+        APR_AUTO_ROUND="$round_num" \
+        APR_AUTO_WORKFLOW="$workflow" \
+            bash -c "$command_to_run" 1>&2
+        return $?
+    fi
+
+    APR_AUTO_PROMPT_FILE="$prompt_file" \
+    APR_AUTO_ROUND="$round_num" \
+    APR_AUTO_WORKFLOW="$workflow" \
+        bash -c "$command_to_run" < "$prompt_file" 1>&2
+    return $?
+}
+
+auto_execute_integration() {
+    local round_num="$1"
+    local workflow="$2"
+    local apr_cli="$3"
+    local prompt_file=""
+
+    if ! prompt_file=$(auto_generate_integration_prompt "$round_num" "$workflow" "$apr_cli"); then
+        return $?
+    fi
+
+    case "$AUTO_INTEGRATION_AGENT" in
+        shell|codex|gemini)
+            auto_run_integration_command "$AUTO_INTEGRATION_COMMAND" "$prompt_file" "$round_num" "$workflow"
+            return $?
+            ;;
+        claude)
+            local claude_cmd="${APR_CLAUDE_CMD:-claude}"
+            # Advanced: allow explicit command override for Claude as a safer path
+            # for very large prompts (via stdin/file-aware commands).
+            if [[ -n "$AUTO_INTEGRATION_COMMAND" ]]; then
+                auto_run_integration_command "$AUTO_INTEGRATION_COMMAND" "$prompt_file" "$round_num" "$workflow"
+                return $?
+            fi
+            if ! command -v "$claude_cmd" >/dev/null 2>&1; then
+                print_error "Integration agent 'claude' is not available: $claude_cmd"
+                print_info "Install Claude Code CLI or use --integration-agent shell/codex/gemini with --integration-command"
+                return "$EXIT_DEPENDENCY_ERROR"
+            fi
+            local prompt_bytes arg_max safe_limit
+            prompt_bytes=$(wc -c < "$prompt_file" 2>/dev/null || echo "0")
+            arg_max=$(getconf ARG_MAX 2>/dev/null || echo "131072")
+            # Keep a wide safety margin for environment + other argv entries.
+            safe_limit=$((arg_max / 4))
+            if [[ "$prompt_bytes" -gt "$safe_limit" ]]; then
+                print_error "Integration prompt is too large for 'claude -p' argument mode ($prompt_bytes bytes)"
+                print_info "Use --integration-command with a stdin/file-aware command (APR_AUTO_PROMPT_FILE is provided)"
+                return "$EXIT_CONFIG_ERROR"
+            fi
+            "$claude_cmd" -p "$(cat "$prompt_file")" 1>&2
+            return $?
+            ;;
+        noop)
+            print_warning "Integration agent is 'noop'; skipping external integration execution"
+            return 0
+            ;;
+        *)
+            print_error "Internal error: unknown integration agent '$AUTO_INTEGRATION_AGENT'"
+            return "$EXIT_PARTIAL_FAILURE"
+            ;;
+    esac
+}
+
+auto_run_round() {
+    local round_num="$1"
+    local workflow="$2"
+    local apr_cli="$3"
+    local cmd=("$apr_cli" run "$round_num" --wait --workflow "$workflow")
+
+    [[ "${INCLUDE_IMPL:-false}" == "true" ]] && cmd+=(--include-impl)
+    [[ "${SKIP_PREFLIGHT:-false}" == "true" ]] && cmd+=(--no-preflight)
+    [[ "${ENABLE_RETRY:-true}" == "false" ]] && cmd+=(--no-retry)
+    [[ "${QUIET_MODE:-false}" == "true" ]] && cmd+=(--quiet)
+    [[ "${VERBOSE:-false}" == "true" ]] && cmd+=(--verbose)
+
+    "${cmd[@]}"
+    return $?
+}
+
+auto_read_convergence_confidence() {
+    local workflow="$1"
+    if ! command -v jq >/dev/null 2>&1; then
+        echo "0"
+        return 0
+    fi
+    if ! metrics_exists "$workflow"; then
+        echo "0"
+        return 0
+    fi
+    metrics_read "$workflow" | jq -r '.convergence.confidence // 0' 2>/dev/null || echo "0"
+}
+
+cmd_auto() {
+    local start_round="${1:-}"
+    local workflow="${WORKFLOW:-default}"
+    local config_path="$CONFIG_DIR/workflows/$workflow.yaml"
+    local apr_cli="$0"
+
+    if [[ -z "$start_round" ]]; then
+        print_error "Round number required"
+        print_info "Usage: apr auto <round_number> [--integration-agent AGENT] [--integration-command CMD]"
+        print_info "Aliases: apr loop <round_number>"
+        exit "$EXIT_USAGE_ERROR"
+    fi
+    if ! is_non_negative_int "$start_round"; then
+        print_error "Round number must be a non-negative integer"
+        print_info "Usage: apr auto <round_number>"
+        exit "$EXIT_USAGE_ERROR"
+    fi
+
+    if [[ ! -f "$config_path" ]]; then
+        print_error "Workflow '$workflow' not found"
+        print_info "Run 'apr list' to see available workflows"
+        exit "$EXIT_CONFIG_ERROR"
+    fi
+
+    if ! check_oracle; then
+        print_error "Oracle not found"
+        print_info "Install with: npm install -g @steipete/oracle"
+        exit "$EXIT_DEPENDENCY_ERROR"
+    fi
+
+    if ! command -v awk >/dev/null 2>&1; then
+        print_error "Auto mode requires awk for threshold/convergence comparisons"
+        print_info "Install awk (or gawk) and re-run"
+        exit "$EXIT_DEPENDENCY_ERROR"
+    fi
+
+    if ! auto_resolve_settings "$config_path"; then
+        exit "$EXIT_CONFIG_ERROR"
+    fi
+
+    print_banner
+    print_header "AUTONOMOUS LOOP MODE"
+    print_info "Workflow: $workflow"
+    print_info "Start round: $start_round"
+    print_info "Integration agent: $AUTO_INTEGRATION_AGENT"
+    print_info "Convergence threshold: $AUTO_CONVERGENCE_THRESHOLD"
+    print_info "Max iterations: $AUTO_MAX_ITERATIONS"
+    echo "" >&2
+
+    local iteration=0
+    local current_round="$start_round"
+    local stop_reason=""
+    local final_convergence="0"
+    local round_status=0
+    local integrate_status=0
+
+    while true; do
+        iteration=$((iteration + 1))
+
+        print_header "AUTO ITERATION $iteration/$AUTO_MAX_ITERATIONS"
+        print_info "Running round $current_round..."
+        auto_run_round "$current_round" "$workflow" "$apr_cli"
+        round_status=$?
+        if [[ $round_status -ne 0 ]]; then
+            print_error "Auto loop failed while running round $current_round"
+            apr_emit_error_code_tag "internal_error"
+            exit "$round_status"
+        fi
+
+        print_info "Executing integration for round $current_round with '$AUTO_INTEGRATION_AGENT'..."
+        auto_execute_integration "$current_round" "$workflow" "$apr_cli"
+        integrate_status=$?
+        if [[ $integrate_status -ne 0 ]]; then
+            print_error "Auto loop failed during integration for round $current_round"
+            apr_emit_error_code_tag "internal_error"
+            exit "$integrate_status"
+        fi
+
+        final_convergence="$(auto_read_convergence_confidence "$workflow")"
+        print_dim "Convergence confidence after round $current_round: $final_convergence"
+
+        # Deterministic precedence: convergence check first, then max iterations.
+        if float_ge "$final_convergence" "$AUTO_CONVERGENCE_THRESHOLD"; then
+            stop_reason="convergence_reached"
+            break
+        fi
+        if [[ "$iteration" -ge "$AUTO_MAX_ITERATIONS" ]]; then
+            stop_reason="max_iterations_reached"
+            break
+        fi
+
+        current_round=$((current_round + 1))
+        echo "" >&2
+    done
+
+    print_success "Auto loop stopped"
+    print_info "Stop reason: $stop_reason"
+    print_info "Iterations executed: $iteration"
+    print_info "Last round: $current_round"
+    print_info "Final convergence: $final_convergence"
+
+    if [[ "${STATS_JSON:-false}" == "true" ]] && command -v jq >/dev/null 2>&1; then
+        jq -nc \
+            --arg workflow "$workflow" \
+            --argjson start_round "$start_round" \
+            --argjson last_round "$current_round" \
+            --argjson iterations "$iteration" \
+            --arg stop_reason "$stop_reason" \
+            --arg integration_agent "$AUTO_INTEGRATION_AGENT" \
+            --argjson convergence_threshold "$AUTO_CONVERGENCE_THRESHOLD" \
+            --argjson max_iterations "$AUTO_MAX_ITERATIONS" \
+            --argjson final_convergence "$final_convergence" \
+            '{
+                workflow: $workflow,
+                start_round: $start_round,
+                last_round: $last_round,
+                iterations: $iterations,
+                stop_reason: $stop_reason,
+                integration_agent: $integration_agent,
+                convergence_threshold: $convergence_threshold,
+                max_iterations: $max_iterations,
+                final_convergence: $final_convergence
+            }'
+    fi
+}
+
+# -----------------------------------------------------------------------------
 # Stats - Round analytics and convergence signals
 # -----------------------------------------------------------------------------
 
@@ -6403,6 +6786,8 @@ show_help() {
         gum style --foreground 214 --bold "COMMANDS" >&2
         gum style --foreground 39 "  Core Workflow" >&2
         echo "    $(gum style --foreground 82 'run <round>')        Run a revision round" >&2
+        echo "    $(gum style --foreground 82 'auto <round>')       Autonomous loop (run -> integrate -> next)" >&2
+        echo "    $(gum style --foreground 82 'loop <round>')       Alias for auto" >&2
         echo "    $(gum style --foreground 82 'setup')              Interactive workflow setup wizard" >&2
         echo "    $(gum style --foreground 82 'status')             Check Oracle session status" >&2
         echo "    $(gum style --foreground 82 'attach <session>')   Attach to running/completed session" >&2
@@ -6437,6 +6822,10 @@ show_help() {
         gum style --faint "  --keep-browser       Keep browser open after completion" >&2
         gum style --faint "  --no-preflight       Skip pre-flight validation checks" >&2
         gum style --faint "  --retry/--no-retry   Enable/disable auto-retry (default: enabled)" >&2
+        gum style --faint "  --integration-agent  Auto mode integration agent (claude|codex|gemini|shell|noop)" >&2
+        gum style --faint "  --integration-command CMD  Auto mode integration command (stdin or {prompt})" >&2
+        gum style --faint "  --convergence-threshold N  Auto mode threshold (0..1)" >&2
+        gum style --faint "  --max-iterations N   Auto mode max loop iterations (>=1)" >&2
         gum style --faint "  --hours NUM          Status window in hours (default: 72)" >&2
         gum style --faint "  --detailed           Show detailed metrics in stats" >&2
         gum style --faint "  --json               Output stats as raw JSON" >&2
@@ -6458,6 +6847,10 @@ show_help() {
         gum style --faint "  APR_VERBOSE          Enable verbose mode (set to true)" >&2
         gum style --faint "  APR_MAX_RETRIES      Max retry attempts (default: 3)" >&2
         gum style --faint "  APR_INITIAL_BACKOFF  Initial retry backoff in seconds (default: 10)" >&2
+        gum style --faint "  APR_AUTO_INTEGRATION_AGENT    Default auto integration agent" >&2
+        gum style --faint "  APR_AUTO_INTEGRATION_COMMAND  Default auto integration command" >&2
+        gum style --faint "  APR_AUTO_CONVERGENCE_THRESHOLD Auto threshold (0..1)" >&2
+        gum style --faint "  APR_AUTO_MAX_ITERATIONS       Auto max iterations (>=1)" >&2
         gum style --faint "  APR_NO_GUM           Disable gum even if available" >&2
         gum style --faint "  NO_COLOR             Disable colored output" >&2
         echo "" >&2
@@ -6468,6 +6861,9 @@ show_help() {
         echo "" >&2
         gum style --foreground 39 "  # Run revision round 1" >&2
         echo "  apr run 1" >&2
+        echo "" >&2
+        gum style --foreground 39 "  # Autonomous loop from round 1" >&2
+        echo "  apr auto 1 --integration-agent shell --integration-command 'your-noninteractive-command'" >&2
         echo "" >&2
         gum style --foreground 39 "  # Run with implementation doc" >&2
         echo "  apr run 2 --include-impl" >&2
@@ -6496,6 +6892,7 @@ show_help() {
         gum style --faint "  4   Configuration error" >&2
         gum style --faint "  10  Network error" >&2
         gum style --faint "  11  Update error" >&2
+        gum style --faint "  12  Busy error (lock/single-flight contention)" >&2
         echo "" >&2
 
         gum style --foreground 39 "More info: https://github.com/${REPO_OWNER}/${REPO_NAME}" >&2
@@ -6510,6 +6907,8 @@ show_help() {
         echo -e "${BOLD}${YELLOW}COMMANDS${NC}" >&2
         echo -e "  ${CYAN}Core Workflow${NC}" >&2
         echo -e "    ${GREEN}run <round>${NC}        Run a revision round" >&2
+        echo -e "    ${GREEN}auto <round>${NC}       Autonomous loop (run -> integrate -> next)" >&2
+        echo -e "    ${GREEN}loop <round>${NC}       Alias for auto" >&2
         echo -e "    ${GREEN}setup${NC}              Interactive workflow setup wizard" >&2
         echo -e "    ${GREEN}status${NC}             Check Oracle session status" >&2
         echo -e "    ${GREEN}attach <session>${NC}   Attach to running/completed session" >&2
@@ -6543,6 +6942,10 @@ show_help() {
         echo "  --keep-browser       Keep browser open after completion" >&2
         echo "  --no-preflight       Skip pre-flight validation checks" >&2
         echo "  --retry/--no-retry   Enable/disable auto-retry (default: enabled)" >&2
+        echo "  --integration-agent  Auto mode integration agent (claude|codex|gemini|shell|noop)" >&2
+        echo "  --integration-command CMD  Auto mode integration command (stdin or {prompt})" >&2
+        echo "  --convergence-threshold N  Auto mode threshold (0..1)" >&2
+        echo "  --max-iterations N   Auto mode max loop iterations (>=1)" >&2
         echo "  --hours NUM          Status window in hours (default: 72)" >&2
         echo "  --detailed           Show detailed metrics in stats" >&2
         echo "  --json               Output stats as raw JSON" >&2
@@ -6563,12 +6966,17 @@ show_help() {
         echo "  APR_VERBOSE          Enable verbose mode (set to true)" >&2
         echo "  APR_MAX_RETRIES      Max retry attempts (default: 3)" >&2
         echo "  APR_INITIAL_BACKOFF  Initial retry backoff in seconds (default: 10)" >&2
+        echo "  APR_AUTO_INTEGRATION_AGENT    Default auto integration agent" >&2
+        echo "  APR_AUTO_INTEGRATION_COMMAND  Default auto integration command" >&2
+        echo "  APR_AUTO_CONVERGENCE_THRESHOLD Auto threshold (0..1)" >&2
+        echo "  APR_AUTO_MAX_ITERATIONS       Auto max iterations (>=1)" >&2
         echo "  APR_NO_GUM           Disable gum even if available" >&2
         echo "  NO_COLOR             Disable colored output" >&2
         echo "" >&2
         echo -e "${BOLD}${YELLOW}EXAMPLES${NC}" >&2
         echo "  apr setup                    # First-time setup" >&2
         echo "  apr run 1                    # Run revision round 1" >&2
+        echo "  apr auto 1 --integration-agent shell --integration-command 'cmd'  # Autonomous loop" >&2
         echo "  apr run 2 --include-impl     # Include implementation doc" >&2
         echo "  apr run 1 --login --wait     # First run with manual login" >&2
         echo "  apr diff 3 5                 # Compare round outputs" >&2
@@ -6584,6 +6992,7 @@ show_help() {
         echo "  4   Configuration error" >&2
         echo "  10  Network error" >&2
         echo "  11  Update error" >&2
+        echo "  12  Busy error (lock/single-flight contention)" >&2
         echo "" >&2
         echo -e "${CYAN}More info: https://github.com/${REPO_OWNER}/${REPO_NAME}${NC}" >&2
     fi
@@ -6667,6 +7076,10 @@ main() {
     EXPORT_SINCE=""
     BACKFILL_ALL=false
     BACKFILL_FORCE=false
+    AUTO_INTEGRATION_AGENT_OVERRIDE=""
+    AUTO_INTEGRATION_COMMAND_OVERRIDE=""
+    AUTO_CONVERGENCE_THRESHOLD_OVERRIDE=""
+    AUTO_MAX_ITERATIONS_OVERRIDE=""
 
     local positional_args=()
 
@@ -6724,6 +7137,38 @@ main() {
             --no-retry)
                 ENABLE_RETRY=false
                 shift
+                ;;
+            --integration-agent)
+                if [[ -z "${2:-}" || "$2" == -* ]]; then
+                    print_error "Option --integration-agent requires a value"
+                    exit $EXIT_USAGE_ERROR
+                fi
+                AUTO_INTEGRATION_AGENT_OVERRIDE="$2"
+                shift 2
+                ;;
+            --integration-command)
+                if [[ -z "${2:-}" || "$2" == -* ]]; then
+                    print_error "Option --integration-command requires a value"
+                    exit $EXIT_USAGE_ERROR
+                fi
+                AUTO_INTEGRATION_COMMAND_OVERRIDE="$2"
+                shift 2
+                ;;
+            --convergence-threshold)
+                if [[ -z "${2:-}" || "$2" == -* ]]; then
+                    print_error "Option --convergence-threshold requires a value"
+                    exit $EXIT_USAGE_ERROR
+                fi
+                AUTO_CONVERGENCE_THRESHOLD_OVERRIDE="$2"
+                shift 2
+                ;;
+            --max-iterations)
+                if [[ -z "${2:-}" || "$2" == -* ]]; then
+                    print_error "Option --max-iterations requires a value"
+                    exit $EXIT_USAGE_ERROR
+                fi
+                AUTO_MAX_ITERATIONS_OVERRIDE="$2"
+                shift 2
                 ;;
             -o|--output)
                 if [[ -z "${2:-}" || "$2" == -* ]]; then
@@ -6829,7 +7274,7 @@ main() {
     fi
 
     local oracle_required=false
-    if [[ "$command_is_round" == "true" || "$command" == "run" ]]; then
+    if [[ "$command_is_round" == "true" || "$command" == "run" || "$command" == "auto" || "$command" == "loop" ]]; then
         if [[ "$DRY_RUN" == "true" && "$RENDER" != "true" ]]; then
             oracle_required=false
         else
@@ -6852,7 +7297,7 @@ main() {
         fi
     else
         # Best-effort Oracle detection for dry-run output
-        if [[ "$command_is_round" == "true" || "$command" == "run" ]]; then
+        if [[ "$command_is_round" == "true" || "$command" == "run" || "$command" == "auto" || "$command" == "loop" ]]; then
             if ! check_oracle; then
                 ORACLE_CMD=("oracle")
                 [[ "$QUIET_MODE" != "true" ]] && print_warning "Oracle not found; dry run will use a placeholder command"
@@ -6874,6 +7319,19 @@ main() {
                 exit $EXIT_USAGE_ERROR
             fi
             run_round "${positional_args[0]}"
+            ;;
+        auto|loop)
+            if [[ ${#positional_args[@]} -lt 1 ]]; then
+                print_error "Round number required"
+                print_info "Usage: apr $command <round_number>"
+                exit $EXIT_USAGE_ERROR
+            fi
+            if ! is_non_negative_int "${positional_args[0]}"; then
+                print_error "Round number must be a non-negative integer"
+                print_info "Usage: apr $command <round_number>"
+                exit $EXIT_USAGE_ERROR
+            fi
+            cmd_auto "${positional_args[0]}"
             ;;
         setup)
             run_setup

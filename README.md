@@ -399,6 +399,8 @@ apr [command] [options]
 |---------|-------------|
 | **Core Workflow** | |
 | `run <round>` | Run a revision round (default if number given) |
+| `auto <round>` | Autonomous loop: run round, integrate automatically, continue |
+| `loop <round>` | Alias for `auto <round>` |
 | `setup` | Interactive workflow setup wizard |
 | `status` | Check Oracle session status |
 | `attach <session>` | Attach to a running/completed session |
@@ -428,6 +430,10 @@ apr [command] [options]
 | `--wait` | Wait for completion (blocking) |
 | `--login` | Manual login mode (first-time setup) |
 | `--keep-browser` | Keep browser open after completion |
+| `--integration-agent AGENT` | Auto mode integration agent (`claude`, `codex`, `gemini`, `shell`, `noop`) |
+| `--integration-command CMD` | Auto mode command (reads stdin by default; use `{prompt}` for file path) |
+| `--convergence-threshold N` | Auto mode stop threshold (`0..1`, auto-only) |
+| `--max-iterations N` | Auto mode iteration cap (`>=1`, auto-only) |
 | `-q, --quiet` | Minimal output (errors only) |
 | `--version` | Show version |
 
@@ -445,6 +451,12 @@ apr run 2
 
 # Run round 3 with implementation doc
 apr run 3 --include-impl
+
+# Run autonomous loop from round 4
+apr auto 4 --integration-agent shell --integration-command 'your-noninteractive-command'
+
+# Same command using alias
+apr loop 4 --integration-agent claude
 
 # Check session status
 apr status
@@ -496,8 +508,9 @@ APR automates this workflow:
 │                                          │                                   │
 │                                          ▼                                   │
 │                      ┌──────────────────────────────────────────────────┐   │
-│                      │  4. INTEGRATE: (Manual) Paste into Claude Code   │   │
-│                      │     - Prime CC with AGENTS.md, README, spec      │   │
+│                      │  4. INTEGRATE: Manual or Auto agent step          │   │
+│                      │     - `apr integrate N` (manual handoff)         │   │
+│                      │     - or `apr auto N` (automatic execution)      │   │
 │                      │     - Apply revisions to specification           │   │
 │                      │     - Update README to match                     │   │
 │                      │     - Harmonize implementation doc               │   │
@@ -545,6 +558,25 @@ With `impl_every_n: 4`:
 - ...and so on
 
 This ensures implementation-grounded feedback at regular intervals without manual intervention. You can still override with `--include-impl` for any specific round.
+
+### Auto Mode Workflow Keys
+
+Auto mode reads these workflow keys:
+
+```yaml
+# .apr/workflows/<name>.yaml
+auto_integration_agent: claude
+# Required for shell; recommended for codex/gemini; optional for claude
+# auto_integration_command: "your-noninteractive-command"
+auto_convergence_threshold: 0.80
+auto_max_iterations: 6
+```
+
+Notes:
+- `auto_integration_agent` is required for `apr auto` / `apr loop` (or pass `--integration-agent`)
+- `auto_convergence_threshold` must be numeric in `[0,1]`
+- `auto_max_iterations` must be a positive integer
+- These controls are **auto-only**; manual `apr run` ignores them
 
 ### Browser Window Visibility
 
@@ -704,6 +736,66 @@ The generated prompt:
 - Adds integration instructions for applying changes
 
 **Workflow tip:** Run `apr integrate 5 -c`, then paste directly into Claude Code. The prompt is structured to maximize Claude's understanding of the context and desired changes.
+
+### Autonomous Loop Mode (`apr auto` / `apr loop`)
+
+`apr auto` runs a continuous cycle:
+1. execute round `N`
+2. run integration automatically
+3. continue with `N+1` until a stop condition is met
+
+```bash
+# Start continuous loop at round 4
+apr auto 4 --integration-agent claude
+
+# Codex/Gemini example with explicit non-interactive command
+apr auto 4 \
+  --integration-agent codex \
+  --integration-command 'codex --search'
+
+# Hard stop after at most 6 iterations
+apr auto 4 --max-iterations 6
+
+# Stop when convergence reaches threshold
+apr auto 4 --convergence-threshold 0.82
+```
+
+Auto-mode stop controls are **auto-only**:
+- `--convergence-threshold` (or `auto_convergence_threshold` in workflow config)
+- `--max-iterations` (or `auto_max_iterations` in workflow config)
+
+You can set defaults in workflow config:
+
+```yaml
+auto_integration_agent: claude
+auto_integration_command: "your command here" # reads stdin; use {prompt} if your command needs the prompt path
+auto_convergence_threshold: 0.80
+auto_max_iterations: 8
+```
+
+Supported integration agents:
+- `claude`: runs `claude -p "<prompt>"`
+- `codex`: executes `--integration-command` (recommended)
+- `gemini`: executes `--integration-command` (recommended)
+- `shell`: executes `--integration-command`
+- `noop`: skips external execution (useful for dry orchestration)
+
+Agent aliases accepted by APR:
+- `claude-code` → `claude`
+- `command` → `shell`
+
+When using command-based agents (`shell`, `codex`, `gemini`):
+- APR sends prompt content on stdin by default
+- If your command needs a file path argument, include `{prompt}` in `--integration-command`
+- APR replaces `{prompt}` with a shell-escaped prompt file path
+- APR exports:
+- `APR_AUTO_PROMPT_FILE`
+- `APR_AUTO_ROUND`
+- `APR_AUTO_WORKFLOW`
+
+Stop policy precedence is deterministic:
+1. `convergence_reached` (confidence >= threshold)
+2. `max_iterations_reached`
 
 ---
 
