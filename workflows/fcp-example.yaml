@@ -22,6 +22,8 @@ documents:
 oracle:
   # Model selection - "5.2 Thinking" enables extended reasoning
   model: "5.2 Thinking"
+  # Hide browser window while Oracle runs (set false to keep it visible)
+  browser_hide_window: true
 
 rounds:
   # Where round outputs are saved

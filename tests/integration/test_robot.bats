@@ -124,6 +124,37 @@ teardown() {
     assert_json_value "$json_output" ".data.round" "1"
 }
 
+@test "apr robot run: includes --browser-hide-window by default" {
+    setup_mock_oracle
+    setup_test_workflow "robot"
+
+    capture_streams "$APR_SCRIPT" robot run 1 -w robot --compact
+
+    log_test_actual "stdout" "$CAPTURED_STDOUT"
+    log_test_actual "stderr" "$CAPTURED_STDERR"
+
+    [[ "$CAPTURED_STATUS" -eq 0 ]]
+    assert_valid_json "$CAPTURED_STDOUT"
+    assert_json_value "$CAPTURED_STDOUT" ".ok" "true"
+    [[ "$CAPTURED_STDERR" == *"--browser-hide-window"* ]]
+}
+
+@test "apr robot run: omits --browser-hide-window when disabled in workflow config" {
+    setup_mock_oracle
+    setup_test_workflow "robot"
+    sed -i '/^[[:space:]]*model:/a\  browser_hide_window: false' ".apr/workflows/robot.yaml"
+
+    capture_streams "$APR_SCRIPT" robot run 1 -w robot --compact
+
+    log_test_actual "stdout" "$CAPTURED_STDOUT"
+    log_test_actual "stderr" "$CAPTURED_STDERR"
+
+    [[ "$CAPTURED_STATUS" -eq 0 ]]
+    assert_valid_json "$CAPTURED_STDOUT"
+    assert_json_value "$CAPTURED_STDOUT" ".ok" "true"
+    [[ "$CAPTURED_STDERR" != *"--browser-hide-window"* ]]
+}
+
 @test "apr robot run: rejects concurrent run for same round" {
     setup_mock_oracle
     setup_test_workflow "robot"

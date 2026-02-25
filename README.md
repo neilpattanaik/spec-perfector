@@ -546,6 +546,16 @@ With `impl_every_n: 4`:
 
 This ensures implementation-grounded feedback at regular intervals without manual intervention. You can still override with `--include-impl` for any specific round.
 
+### Browser Window Visibility
+
+APR passes Oracle's `--browser-hide-window` by default. To keep the browser visible during runs, set this in your workflow:
+
+```yaml
+oracle:
+  model: "5.2 Thinking"
+  browser_hide_window: false
+```
+
 ---
 
 ## 🧙 Interactive Setup
