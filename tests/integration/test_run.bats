@@ -682,6 +682,26 @@ EOF
     assert_output --partial "--notify"
 }
 
+@test "run --dry-run: includes --browser-hide-window by default" {
+    run "$APR_SCRIPT" run 1 --dry-run
+
+    log_test_output "$output"
+
+    assert_success
+    assert_output --partial "--browser-hide-window"
+}
+
+@test "run --dry-run: omits --browser-hide-window when disabled in workflow config" {
+    sed -i '/^[[:space:]]*model:/a\  browser_hide_window: false' ".apr/workflows/default.yaml"
+
+    run "$APR_SCRIPT" run 1 --dry-run
+
+    log_test_output "$output"
+
+    assert_success
+    [[ "$output" != *"--browser-hide-window"* ]]
+}
+
 @test "run --dry-run: includes engine browser flag" {
     run "$APR_SCRIPT" run 1 --dry-run
 
